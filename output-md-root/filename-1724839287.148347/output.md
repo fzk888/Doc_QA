@@ -1,1 +1,0 @@
-![](figures/0-1-FIGURE.jpg)

@@ -1,7 +1,0 @@
-## 科蓝软件介绍
-
-## 产品介绍
-
-系统架构和设计
-
-案例 $\acute{\jmath}$ 析和答疑 $\exists\frac{\overline{{\Xi}}} {\overline{{\chi}}}$ CONTENTS
