@@ -1,0 +1,373 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# PyInstaller
+#  Usually these files are written by a python script from a template
+#  before PyInstaller builds the exe, so as to inject date/other infos into it.
+*.manifest
+*.spec
+
+# Installer logs
+pip-log.txt
+pip-delete-this-directory.txt
+
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
+
+# Translations
+*.mo
+*.pot
+
+# Django stuff:
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask stuff:
+instance/
+.webassets-cache
+
+# Scrapy stuff:
+.scrapy
+
+# Sphinx documentation
+docs/_build/
+
+# PyBuilder
+target/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+#   According to pypa/pipenv#598, it is recommended to include Pipfile.lock in version control.
+#   However, in case of collaboration, if having platform-specific dependencies or dependencies
+#   having no cross-platform support, pipenv may install dependencies that don't work, or not
+#   install all needed dependencies.
+#Pipfile.lock
+
+# PEP 582; used by e.g. github.com/David-OConnor/pyflow
+__pypackages__/
+
+# Celery stuff
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath parsed files
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# Spyder project settings
+.spyderproject
+.spyproject
+
+# Rope project settings
+.ropeproject
+
+# mkdocs documentation
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre type checker
+.pyre/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Large files
+*.run
+*.deb
+*.exe
+*.msi
+*.iso
+*.img
+*.bin
+*.dmg
+*.pkg
+*.rpm
+*.sh
+
+# Model files
+model/
+
+# Output directories
+output-md-root/
+images/
+
+# Trie files
+*.trie
+
+# Knowledge base directories
+Knowledge_based/test/
+Knowledge_based/test0705/
+Knowledge_based/test0823/
+Knowledge_based/test0824/
+Knowledge_based/test_kb/
+
+# Platform-specific files (keep only Windows-related files)
+# Linux/Mac specific files
+*.so
+*.dylib
+*/linux/*
+*/macos/*
+*/darwin/*
+*/ubuntu/*
+*/debian/*
+*/centos/*
+*/unix/*
+*/posix/*
+*/makefile
+*/Makefile
+*/configure
+*/config
+*/autogen.sh
+*/install.sh
+*/build.sh
+*/compile.sh
+*/bootstrap.sh
+*/setup.sh
+*/test.sh
+*/run.sh
+*/start.sh
+*/stop.sh
+*/restart.sh
+*/clean.sh
+*/distclean.sh
+*/mrproper.sh
+*/defconfig.sh
+*/menuconfig.sh
+*/xconfig.sh
+*/gconfig.sh
+*/oldconfig.sh
+*/silentoldconfig.sh
+*/randconfig.sh
+*/defconfig.sh
+*/alldefconfig.sh
+*/allyesconfig.sh
+*/allnoconfig.sh
+*/allmodconfig.sh
+*/allrandomconfig.sh
+*/kvmconfig.sh
+*/xenconfig.sh
+*/tinyconfig.sh
+*/listnewconfig.sh
+*/olddefconfig.sh
+*/savedefconfig.sh
+*/syncconfig.sh
+*/check.sh
+*/release.sh
+*/package.sh
+*/deploy.sh
+*/publish.sh
+*/upload.sh
+*/download.sh
+*/fetch.sh
+*/clone.sh
+*/pull.sh
+*/push.sh
+*/commit.sh
+*/status.sh
+*/log.sh
+*/diff.sh
+*/merge.sh
+*/rebase.sh
+*/reset.sh
+*/checkout.sh
+*/branch.sh
+*/tag.sh
+*/remote.sh
+*/submodule.sh
+*/stash.sh
+*/reflog.sh
+*/show.sh
+*/blame.sh
+*/grep.sh
+*/apply.sh
+*/cherry-pick.sh
+*/revert.sh
+*/bisect.sh
+*/worktree.sh
+*/archive.sh
+*/bundle.sh
+*/daemon.sh
+*/fast-export.sh
+*/fast-import.sh
+*/filter-branch.sh
+*/mergetool.sh
+*/pack-refs.sh
+*/prune.sh
+*/reflog.sh
+*/relink.sh
+*/remotes.sh
+*/send-email.sh
+*/shell.sh
+*/unpack-file.sh
+*/update-server-info.sh
+*/write-tree.sh
+*/verify-pack.sh
+*/verify-commit.sh
+*/var.sh
+*/update-index.sh
+*/unpack-objects.sh
+*/unpack-receive-pack.sh
+*/upload-archive.sh
+*/upload-pack.sh
+*/show-index.sh
+*/show-ref.sh
+*/symbolic-ref.sh
+*/switch.sh
+*/switch-to.sh
+*/symbolic-link.sh
+*/symbolic-name.sh
+*/switch-branch.sh
+*/switch-to-branch.sh
+*/switch-to-commit.sh
+*/switch-to-tag.sh
+*/switch-to-remote.sh
+*/switch-to-submodule.sh
+*/switch-to-worktree.sh
+*/switch-to-index.sh
+*/switch-to-stash.sh
+*/switch-to-reflog.sh
+*/switch-to-bisect.sh
+*/switch-to-rebase.sh
+*/switch-to-merge.sh
+*/switch-to-cherry-pick.sh
+*/switch-to-revert.sh
+*/switch-to-apply.sh
+*/switch-to-diff.sh
+*/switch-to-log.sh
+*/switch-to-show.sh
+*/switch-to-blame.sh
+*/switch-to-grep.sh
+*/switch-to-archive.sh
+*/switch-to-bundle.sh
+*/switch-to-daemon.sh
+*/switch-to-fast-export.sh
+*/switch-to-fast-import.sh
+*/switch-to-filter-branch.sh
+*/switch-to-mergetool.sh
+*/switch-to-pack-refs.sh
+*/switch-to-prune.sh
+*/switch-to-reflog.sh
+*/switch-to-relink.sh
+*/switch-to-remotes.sh
+*/switch-to-send-email.sh
+*/switch-to-shell.sh
+*/switch-to-unpack-file.sh
+*/switch-to-update-server-info.sh
+*/switch-to-write-tree.sh
+*/switch-to-verify-pack.sh
+*/switch-to-verify-commit.sh
+*/switch-to-var.sh
+*/switch-to-update-index.sh
+*/switch-to-unpack-objects.sh
+*/switch-to-unpack-receive-pack.sh
+*/switch-to-upload-archive.sh
+*/switch-to-upload-pack.sh
+*/switch-to-show-index.sh
+*/switch-to-show-ref.sh
+*/switch-to-symbolic-ref.sh
+*/switch-to-worktree.sh
+*/switch-to-index.sh
+*/switch-to-stash.sh
+*/switch-to-reflog.sh
+*/switch-to-bisect.sh
+*/switch-to-rebase.sh
+*/switch-to-merge.sh
+*/switch-to-cherry-pick.sh
+*/switch-to-revert.sh
+*/switch-to-apply.sh
+*/switch-to-diff.sh
+*/switch-to-log.sh
+*/switch-to-show.sh
+*/switch-to-blame.sh
+*/switch-to-grep.sh
+*/switch-to-archive.sh
+*/switch-to-bundle.sh
+*/switch-to-daemon.sh
+*/switch-to-fast-export.sh
+*/switch-to-fast-import.sh
+*/switch-to-filter-branch.sh
+*/switch-to-mergetool.sh
+*/switch-to-pack-refs.sh
+*/switch-to-prune.sh
+*/switch-to-reflog.sh
+*/switch-to-relink.sh
+*/switch-to-remotes.sh
+*/switch-to-send-email.sh
+*/switch-to-shell.sh
+*/switch-to-unpack-file.sh
+*/switch-to-update-server-info.sh
+*/switch-to-write-tree.sh
+*/switch-to-verify-pack.sh
+*/switch-to-verify-commit.sh
+*/switch-to-var.sh
+*/switch-to-update-index.sh
+*/switch-to-unpack-objects.sh
+*/switch-to-unpack-receive-pack.sh
+*/switch-to-upload-archive.sh
+*/switch-to-upload-pack.sh
+*/switch-to-show-index.sh
+*/switch-to-show-ref.sh
+*/switch-to-symbolic-ref.sh

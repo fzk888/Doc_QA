@@ -1,0 +1,15 @@
+sudo apt-get update
+sudo apt-get install libicu-dev
+export DOTNET_SYSTEM_GLOBALIZATION_INVARIANT=1
+
+export LD_LIBRARY_PATH=/usr/local/lib/libssl.so
+sudo dpkg -i libssl1.0.0_1.0.2g-1ubuntu4.20_amd64.deb
+sudo apt install libgdiplus
+
+#####OCR
+pip install pix2text -i https://mirrors.aliyun.com/pypi/simple
+p2t serve -l en,ch_sim -H 0.0.0.0 -p 8503
+
+#####antiword
+sudo apt-get update
+sudo apt-get install antiword
