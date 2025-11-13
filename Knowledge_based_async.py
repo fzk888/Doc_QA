@@ -23,39 +23,44 @@ import yaml
 with open("config.yaml", "r") as config_file:
     config = yaml.safe_load(config_file)
 
+import logging
+logger = logging.getLogger("docqa.kb")
+
+# 从配置文件中获取最大工作进程数，设置默认值为4
+MAX_WORKERS = config['system'].get('max_workers', 4)
+
 class KnowledgeBase:
     def __init__(self, kb_name, embeddings):
         self.kb_name = kb_name
-        self.base_directory = config['paths']['kb_dir']
-        self.doc_directory = os.path.join(self.base_directory, kb_name, "doc_directory")
-        self.markdown_directory = os.path.join(self.base_directory, kb_name, "markdown_directory")
-        self.image_directory = os.path.join(self.base_directory, kb_name, "image_output")
         self.embeddings = embeddings
-        
-        os.makedirs(self.doc_directory, exist_ok=True)
-        os.makedirs(self.markdown_directory, exist_ok=True)
-        os.makedirs(self.image_directory, exist_ok=True)
-        
+        KB_DIR = config['paths']['kb_dir']
+        # 为与其他方法一致，设置 base_directory 指向配置中的知识库根目录
+        self.base_directory = KB_DIR
+        self.kb_dir = os.path.join(KB_DIR, kb_name)
         self.vectordb = None
-        self.files_vectordb = None
-        self.bm25_searcher = None
-        self.history = []
         self.uploaded_files = set()
-        self.Sreach_load_flag = False
+        self.image_directory = os.path.join(self.kb_dir, "images")
+        self.markdown_directory = os.path.join(self.kb_dir, "markdown_directory")
+        os.makedirs(self.image_directory, exist_ok=True)
+        os.makedirs(self.markdown_directory, exist_ok=True)
+        # 使用配置中的最大工作进程数
+        self.executor = ProcessPoolExecutor(max_workers=MAX_WORKERS)
 
     async def load_vectordb(self):
         if self.vectordb is None:
             faiss_index_path = os.path.join(self.base_directory, self.kb_name, "faiss_index")
             if os.path.exists(faiss_index_path):
                 try:
+                    logger.info("正在加载 FAISS 索引...")
                     self.vectordb = await asyncio.to_thread(FAISS.load_local, faiss_index_path, self.embeddings, allow_dangerous_deserialization=True)
-                    print(self.vectordb)
+                    logger.info(f"Loaded vectordb for {self.kb_name}")
                 except Exception as e:
-                    print(f"加载向量库失败: {str(e)}")
+                    logger.exception(f"加载向量库失败: {str(e)}")
                     self.vectordb = None
         return self.vectordb
 
     async def process_files(self, files):
+        logger.info("正在解析并分块上传文件...")
         start = time.time()
 
         # 文件分类
@@ -83,52 +88,126 @@ class KnowledgeBase:
 
         all_md_header_splits = []
 
-        async def process_file_group(file_group, process_func, desc, *args):
-            for file in tqdm(file_group, desc=desc):
-                future = self.executor.submit(process_func, file, *args)
-                md_header_splits = await asyncio.wrap_future(future)
+        # 顺序处理文件组，避免并行处理导致的内存问题
+        for file in tqdm(file_groups['docx'], desc="Processing DOCX files"):
+            try:
+                md_header_splits = process_doc_file(file, self.image_directory, self.markdown_directory)
                 all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
 
-        with ProcessPoolExecutor(max_workers=5) as self.executor:
-            await asyncio.gather(
-                process_file_group(file_groups['docx'], process_doc_file, "Processing DOCX files", self.image_directory, self.markdown_directory),
-                process_file_group(file_groups['doc'], process_doc2_file, "Processing DOC files", self.markdown_directory),
-                process_file_group(file_groups['pdf'], process_pdf, "Processing PDF files", self.image_directory, self.markdown_directory),
-                process_file_group(file_groups['md'], process_md_file, "Processing Markdown files", self.markdown_directory),
-                process_file_group(file_groups['txt'], process_txt_file, "Processing TXT files", self.markdown_directory),
-                process_file_group(file_groups['pptx'], process_ppt_file, "Processing PPT files", self.image_directory, self.markdown_directory),
-                process_file_group(file_groups['html'], process_html_file, "Processing HTML files", self.markdown_directory),
-                process_file_group(file_groups['xlsx'], process_excel_file, "Processing XLSX files", self.markdown_directory),
-                process_file_group(file_groups['csv'], process_csv_file, "Processing CSV files", self.markdown_directory),
-                process_file_group(file_groups['jpg'], process_pic_file, "Processing JPG files", self.markdown_directory),
-                process_file_group(file_groups['png'], process_pic_file, "Processing PNG files", self.markdown_directory)
-            )
+        for file in tqdm(file_groups['doc'], desc="Processing DOC files"):
+            try:
+                md_header_splits = process_doc2_file(file, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
+
+        for file in tqdm(file_groups['pdf'], desc="Processing PDF files"):
+            try:
+                md_header_splits = process_pdf(file, self.image_directory, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
+
+        for file in tqdm(file_groups['md'], desc="Processing Markdown files"):
+            try:
+                md_header_splits = process_md_file(file, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
+
+        for file in tqdm(file_groups['txt'], desc="Processing TXT files"):
+            try:
+                md_header_splits = process_txt_file(file, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
+
+        for file in tqdm(file_groups['pptx'], desc="Processing PPT files"):
+            try:
+                md_header_splits = process_ppt_file(file, self.image_directory, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
+
+        for file in tqdm(file_groups['html'], desc="Processing HTML files"):
+            try:
+                md_header_splits = process_html_file(file, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
+
+        for file in tqdm(file_groups['xlsx'], desc="Processing XLSX files"):
+            try:
+                md_header_splits = process_excel_file(file, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
+
+        for file in tqdm(file_groups['csv'], desc="Processing CSV files"):
+            try:
+                md_header_splits = process_csv_file(file, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
+
+        for file in tqdm(file_groups['jpg'], desc="Processing JPG files"):
+            try:
+                md_header_splits = process_pic_file(file, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
+
+        for file in tqdm(file_groups['png'], desc="Processing PNG files"):
+            try:
+                md_header_splits = process_pic_file(file, self.markdown_directory)
+                all_md_header_splits.extend(md_header_splits)
+            except Exception as e:
+                print(f"处理文件 {file} 时出错: {e}")
+                continue
 
         end = time.time()
         print(f"解析文档总共耗时: {end - start:.2f} 秒")
         return all_md_header_splits
-    async def vectorize_documents(self, documents):
-        start = time.time()
 
-        # 每批处理的文档数
-        batch_size = 100  # 可以根据需要调整这个值
+    async def vectorize_documents(self, documents):
+        logger.info("正在构建向量索引（FAISS）...")
+        start = time.time()
+        # 每批处理的文档数（可通过 config.yaml 的 settings.vector_batch_size 调整）
+        batch_size = config['settings'].get('vector_batch_size', 100)
 
         vectordb = None
-        for i in tqdm(range(0, len(documents), batch_size), desc="Vectorizing documents"):
+        batch_index = 0
+        for i in range(0, len(documents), batch_size):
+            batch_index += 1
             batch = documents[i:i+batch_size]
-            
+            batch_start = time.time()
+
             # 异步创建FAISS向量数据库
             batch_vectordb = await FAISS.afrom_documents(batch, self.embeddings)
             if vectordb is None:
                 vectordb = batch_vectordb
             else:
                 vectordb.merge_from(batch_vectordb)
-            
+
             # 清理 GPU 缓存
             self.clean_gpu_cache()
+            batch_end = time.time()
+            logger.info(f"Vectorized batch {batch_index} size={len(batch)} time={(batch_end-batch_start):.2f}s")
 
         end = time.time()
-        print(f"向量化文档总共耗时: {end - start:.2f} 秒")
+        logger.info(f"向量化文档总共耗时: {end - start:.2f} 秒")
         return vectordb
 
     def clean_gpu_cache(self):
@@ -139,6 +218,7 @@ class KnowledgeBase:
 
 
     async def save_vectordb(self, vectordb):
+        logger.info("正在保存向量索引到磁盘...")
         faiss_index_path = os.path.join(self.base_directory, self.kb_name, "faiss_index")
         await asyncio.to_thread(vectordb.save_local, faiss_index_path)
 
@@ -187,46 +267,81 @@ class KnowledgeBase:
 
         # 如果向量数据库不存在，则创建一个新的
         if self.vectordb is None:
+            logger.info("正在首次构建向量库...")
             self.vectordb = await self.get_faiss_vectordb(new_files)
+            # 保存新创建的向量库到磁盘，以便后续可以加载
+            if self.vectordb is not None:
+                try:
+                    await self.save_vectordb(self.vectordb)
+                except Exception as e:
+                    print(f"保存向量库失败: {e}")
+            # 更新已上传文件集合
+            for file in new_files:
+                self.uploaded_files.add(os.path.basename(file))
         else:
             # 如果向量数据库存在，加载现有的向量数据库和文件
             await self.load_vectordb_and_files()
             # 初始化一个列表，用于存储需要删除的文件
             files_to_delete = []
             # 获取文件所在的目录
-            directories = os.path.dirname(files[0])
+            directories = os.path.dirname(files[0]) if files else ""
             
             # 检查已上传的文件，如果在新文件列表中，则添加到待删除列表
             for i in self.uploaded_files:
                 if i in new_files_names:
-                    files_to_delete.append(os.path.join(directories, i))
+                    files_to_delete.append(i)
 
-            # 遍历待删除的文件
-            for file_name in files_to_delete:
-                doc_ids = []
-                # 查找与待删除文件相关的文档ID
-                for doc_id, doc in self.vectordb.docstore._dict.items():
-                    file_path = doc.metadata.get('file_path', '')
-                    if file_path == file_name:
-                        doc_ids.append(doc_id)
-
-                # 如果找到相关的文档ID，则从向量数据库中删除这些文档
-                if doc_ids:
-                    await asyncio.to_thread(self.vectordb.delete, ids=doc_ids)
-                # 从已上传文件列表中移除该文件
-                self.uploaded_files.remove(os.path.basename(file_name))
+            # 删除向量数据库中已存在的文件
+            if files_to_delete:
+                # 创建一个新的列表，包含不在待删除列表中的文档ID
+                remaining_docs = [doc_id for doc_id, doc in self.vectordb.docstore._dict.items() 
+                                if os.path.basename(doc.metadata.get('file_path', '')) not in files_to_delete]
                 
-                print("删除文件", [file_name])
+                # 检查是否有剩余文档
+                if remaining_docs:
+                    # 创建一个新的向量数据库，只包含剩余的文档
+                    remaining_vectordb = await asyncio.to_thread(
+                        FAISS.from_documents, 
+                        [self.vectordb.docstore._dict[doc_id] for doc_id in remaining_docs], 
+                        self.embeddings
+                    )
+                    # 更新当前的向量数据库
+                    self.vectordb = remaining_vectordb
+                else:
+                    # 如果没有剩余文档，则设置向量数据库为None
+                    self.vectordb = None
+                    # 清空已上传文件列表
+                    self.uploaded_files.clear()
 
-            # 为新文件创建一个新的向量数据库
-            new_vectordb = await self.get_faiss_vectordb(new_files)
-            # 将新的向量数据库合并到现有的向量数据库中
-            await asyncio.to_thread(self.vectordb.merge_from, new_vectordb)
-        
-        # 设置 FAISS 索引的保存路径
-        faiss_index_path = os.path.join(self.base_directory, self.kb_name, "faiss_index")
-        # 保存更新后的向量数据库到本地
-        await asyncio.to_thread(self.vectordb.save_local, faiss_index_path)
+            # 处理新文件
+            try:
+                new_documents = await self.process_files(new_files)
+                if new_documents:
+                    # 如果有新文档，将它们添加到向量数据库
+                    if self.vectordb is not None:
+                        # 如果向量数据库存在，添加新文档
+                        logger.info("正在增量向量化并合并索引...")
+                        new_vectordb = await FAISS.afrom_documents(new_documents, self.embeddings)
+                        self.vectordb.merge_from(new_vectordb)
+                    else:
+                        # 如果向量数据库不存在，创建新的
+                        logger.info("正在首次构建向量库...")
+                        self.vectordb = await FAISS.afrom_documents(new_documents, self.embeddings)
+                
+                # 更新已上传文件列表
+                for file in new_files:
+                    self.uploaded_files.add(os.path.basename(file))
+                
+                # 保存向量数据库
+                if self.vectordb is not None:
+                    await self.save_vectordb(self.vectordb)
+                
+                # 返回处理结果
+                return f"已更新 {len(new_files)} 个文件{new_files_names}到知识库 {self.kb_name} 的向量数据库"
+            except Exception as e:
+                error_msg = f"处理文件时出错: {str(e)}"
+                print(error_msg)
+                raise Exception(error_msg)
     
         gc.collect()
         self.clean_gpu_cache()

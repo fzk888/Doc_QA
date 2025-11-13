@@ -1,4 +1,5 @@
-from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Request, Depends
+from fastapi import FastAPI, Form, File, UploadFile, HTTPException, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
@@ -10,23 +11,42 @@ import os
 import shutil
 import yaml
 import logging
+import time
+from logging.handlers import RotatingFileHandler
 import aiofiles
 import json
 from functions import (
-    #load_vectordb_and_files,
     run_llm_Knowlege_baes_file_QA,
     run_llm_MulitDocQA,
     view_history,
     generate_guiding_questions,
     stream_type,
-    embeddings,
     kb_state,
-    only_llm
+    only_llm,
+    get_embeddings
 )
 from functions import get_top_documents,create_final_response
-# Configure logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Configure logging (console + rotating file)
+LOG_DIR = os.path.join(os.getcwd(), "logs")
+os.makedirs(LOG_DIR, exist_ok=True)
+LOG_FILE = os.path.join(LOG_DIR, "server.log")
+
+logger = logging.getLogger("docqa")
+logger.setLevel(logging.INFO)
+
+# Avoid duplicate handlers when reloading in dev
+if not any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
+    file_handler = RotatingFileHandler(LOG_FILE, maxBytes=2 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s"))
+    logger.addHandler(file_handler)
+
+if not any(h for h in logger.handlers if getattr(h, "_is_console", False)):
+    console_handler = logging.StreamHandler()
+    console_handler._is_console = True
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s"))
+    logger.addHandler(console_handler)
 
 # Load configuration
 with open("config.yaml", "r") as config_file:
@@ -34,6 +54,31 @@ with open("config.yaml", "r") as config_file:
 
 # Initialize FastAPI app
 app = FastAPI()
+
+# Enable CORS so the local frontend (served from file system or another port) can call the API
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # 允许任意来源（本地 file:// 与不同端口）
+    allow_credentials=False,  # 避免浏览器在有凭据时拒绝 * 的 CORS 响应
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# Simple request logging middleware
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    start = time.time()
+    method = request.method
+    path = request.url.path
+    try:
+        response = await call_next(request)
+        duration_ms = (time.time() - start) * 1000
+        logger.info(f"{method} {path} -> {response.status_code} in {duration_ms:.1f}ms")
+        return response
+    except Exception as e:
+        duration_ms = (time.time() - start) * 1000
+        logger.exception(f"{method} {path} failed after {duration_ms:.1f}ms: {e}")
+        raise
 
 # Global variables
 # UPLOAD_DIRECTORY = "uploads" 
@@ -75,6 +120,20 @@ class FinalResponseRequest(BaseModel):
 #     load_vectordb_and_files()
 
 
+@app.get("/list_kb")
+async def list_kb_api():
+    try:
+        KB_DIR = config['paths']['kb_dir']
+        if not os.path.exists(KB_DIR):
+            return JSONResponse(status_code=200, content={"code": 200, "data": []})
+        names = [name for name in os.listdir(KB_DIR) if os.path.isdir(os.path.join(KB_DIR, name))]
+        logger.info(f"List KBs: {names}")
+        return JSONResponse(status_code=200, content={"code": 200, "data": names})
+    except Exception as e:
+        error_message = str(e)
+        logger.error(f"Failed to list KBs: {error_message}")
+        return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
+
 @app.post("/delete_kb")
 async def delete_kb(kb_name: str = Form(...)):
     KB_dir = config['paths']['kb_dir']
@@ -94,19 +153,21 @@ async def delete_kb(kb_name: str = Form(...)):
         return JSONResponse(status_code=500, content={"code":500, "message": f"Knowledge base '{kb_name}' does not exist"})
 
 @app.post("/update_vectordb")
-async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] = File(...), state=kb_state):
+async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] = File(...)):
     KB_DIR = config['paths']['kb_dir']
     kb_dir = os.path.join(KB_DIR, kb_name)
     upload_directory = os.path.join(kb_dir, "uploads")
     os.makedirs(upload_directory, exist_ok=True)
 
     kb = None
+    # 使用全局 kb_state，避免 FastAPI/Pydantic 对默认参数进行深拷贝导致 _thread.lock 错误
+    state = kb_state
 
     # 检查知识库是否存在
     if not os.path.exists(kb_dir):
         try:
             os.makedirs(kb_dir, exist_ok=True)
-            kb = KnowledgeBase(kb_name, embeddings)
+            kb = KnowledgeBase(kb_name, get_embeddings())
             state.current_kb_name = kb_name
         except Exception as e:
             error_message = str(e)
@@ -114,18 +175,29 @@ async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] 
             return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
     else:
         try:
-            kb = KnowledgeBase(kb_name, embeddings)
+            kb = KnowledgeBase(kb_name, get_embeddings())
         except Exception as e:
             error_message = str(e)
             logger.error(f"Error occurred while loading knowledge base '{kb_name}': {error_message}")
             return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
 
-    # 保存上传的文件
+    # 保存上传的文件，并保留副本到 doc_directory
     try:
+        saved_paths = []
         for file in files:
-            file_path = os.path.join(upload_directory, file.filename)
+            safe_name = os.path.basename(file.filename)
+            file_path = os.path.join(upload_directory, safe_name)
             async with aiofiles.open(file_path, "wb") as buffer:
-                await buffer.write(await file.read())
+                content = await file.read()
+                await buffer.write(content)
+            # 保留一份到 doc_directory，便于用户核查原始文件
+            try:
+                doc_copy_path = os.path.join(kb.kb_dir, "doc_directory", safe_name)
+                await asyncio.to_thread(shutil.copy2, file_path, doc_copy_path)
+            except Exception as copy_err:
+                logger.warning(f"Copy to doc_directory failed for {safe_name}: {copy_err}")
+            saved_paths.append(file_path)
+        logger.info(f"Received {len(saved_paths)} file(s) for knowledge base '{kb_name}': {saved_paths}")
     except Exception as e:
         error_message = str(e)
         logger.error(f"Error occurred while saving files for knowledge base '{kb_name}': {error_message}")
@@ -135,6 +207,7 @@ async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] 
         files = [os.path.join(upload_directory, filename) for filename in os.listdir(upload_directory)]
         # 更新向量库
         print("# 更新向量库\n\n")
+        logger.info(f"Start updating vector DB for KB '{kb_name}' with {len(files)} file(s)")
         result = await kb.update_vectordb(files)
         
         # 重新加载向量库
@@ -145,11 +218,9 @@ async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] 
         await update_global_state(kb_name, kb, state)
         print('# 更新全局状态\n\n')
 
-        # 清空上传目录
-        await asyncio.to_thread(shutil.rmtree, upload_directory)
-        print('# 清空上传目录\n\n')
-        
-        os.makedirs(upload_directory)
+        # 可选择：保留 uploads 目录中的文件。此处不再清空，便于用户确认上传成功
+        # 如需节省空间，可改为移动到 doc_directory 后清空。
+        logger.info(f"Knowledge base '{kb_name}' vector DB updated; uploads retained for verification.")
 
         logger.info(f"Knowledge base '{kb_name}' updated successfully")
         
@@ -160,12 +231,32 @@ async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] 
         logger.error(f"Error occurred while updating knowledge base '{kb_name}': {error_message}")
         return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
 
+@app.get("/logs")
+async def get_logs(lines: int = 200):
+    try:
+        if not os.path.exists(LOG_FILE):
+            return JSONResponse(status_code=200, content={"code": 200, "message": "log file not found", "lines": []})
+        with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
+            content = f.read()
+        logs = content.splitlines()[-max(1, min(lines, 2000)):]  # 防止一次性返回过多
+        return JSONResponse(status_code=200, content={"code": 200, "lines": logs})
+    except Exception as e:
+        error_message = str(e)
+        logger.error(f"Error reading logs: {error_message}")
+        return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
+
 async def update_global_state(kb_name, kb, state):
     state.kb = kb
     state.kb_vectordb = await state.kb.load_vectordb()
     state.history = []
-    state.unfilter_context = [doc for doc_id, doc in state.kb_vectordb.docstore._dict.items()]
-    state.searcher_from_target_doc = BM25Search(state.unfilter_context)
+    # 防御性处理：向量库可能尚未创建或为空
+    if state.kb_vectordb is not None:
+        state.unfilter_context = [doc for doc_id, doc in state.kb_vectordb.docstore._dict.items()]
+        logger.info("正在初始化 BM25 索引...")
+        state.searcher_from_target_doc = BM25Search(state.unfilter_context)
+    else:
+        state.unfilter_context = []
+        state.searcher_from_target_doc = None
     state.current_kb_name = kb_name
     print("重新选择向量库完成")
     logger.info(f"Knowledge base '{kb_name}' selected successfully")
@@ -253,53 +344,64 @@ async def update_global_state(kb_name, kb, state):
 
 @app.post("/view_guiding_questions")
 async def view_guiding_questions_api(request: Request):
-    request_body = await request.json()
-    kb_name = request_body.get('kb_name')
+    try:
+        request_body = await request.json()
+        kb_name = request_body.get('kb_name')
 
-    #add 数据库加载
-    KB_DIR = config['paths']['kb_dir']
-    
-    # global kb_state  # 确保使用全局的kb_state实例
-    # 检查是否需要重新加载知识库
-    if kb_state.current_kb_name == kb_name:
-        logger.info(f"Knowledge base '{kb_name}' is already loaded")
-    else:
-        kb_dir = os.path.join(KB_DIR, kb_name)
-        if os.path.exists(kb_dir):
-            try:
-                kb_state.kb = KnowledgeBase(kb_name, embeddings)
-                kb_state.kb_vectordb = kb_state.kb.load_vectordb()
-                kb_state.history = []
-                kb_state.unfilter_context = [doc for doc_id, doc in kb_state.kb_vectordb.docstore._dict.items()]
-                kb_state.searcher_from_target_doc = BM25Search(kb_state.unfilter_context)
-                kb_state.current_kb_name = kb_name  # 更新当前知识库名称
-                logger.info(f"Knowledge base '{kb_name}' selected successfully")
-                #yield JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' selected successfully"})
-            except Exception as e:
-                error_message = str(e)
-                logger.error(f"Error occurred while selecting knowledge base '{kb_name}': {error_message}")
-                return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
+        #add 数据库加载
+        KB_DIR = config['paths']['kb_dir']
+        
+        # global kb_state  # 确保使用全局的kb_state实例
+        # 检查是否需要重新加载知识库
+        if kb_state.current_kb_name == kb_name:
+            logger.info(f"Knowledge base '{kb_name}' is already loaded")
         else:
-            try:
-                os.makedirs(kb_dir, exist_ok=True)
-                kb_state.kb = KnowledgeBase(kb_name, embeddings)
-                kb_state.kb_vectordb = None
-                kb_state.history = []
-                kb_state.unfilter_context = []
-                kb_state.searcher_from_target_doc = None
-                kb_state.current_kb_name = kb_name  # 更新当前知识库名称
-                logger.info(f"Knowledge base '{kb_name}' created successfully")
-                #return JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' created successfully"})
-            except Exception as e:
-                error_message = str(e)
-                logger.error(f"Error occurred while creating knowledge base '{kb_name}': {error_message}")
-                return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
-#    except Exception as e:
-#        error_message = str(e)
-#        logger.error(f"An unexpected error occurred: {error_message}")
-#        raise HTTPException(status_code=500, detail={"code": 500, "message":f"An unexpected error occurred: {error_message}"})
+            kb_dir = os.path.join(KB_DIR, kb_name)
+            if os.path.exists(kb_dir):
+                try:
+                    kb_state.kb = KnowledgeBase(kb_name, embeddings)
+                    kb_state.kb_vectordb = await kb_state.kb.load_vectordb()
+                    kb_state.history = []
+                    # 防御：向量库可能尚未创建
+                    if kb_state.kb_vectordb is not None:
+                        kb_state.unfilter_context = [doc for doc_id, doc in kb_state.kb_vectordb.docstore._dict.items()]
+                        kb_state.searcher_from_target_doc = BM25Search(kb_state.unfilter_context)
+                    else:
+                        kb_state.unfilter_context = []
+                        kb_state.searcher_from_target_doc = None
+                    kb_state.current_kb_name = kb_name  # 更新当前知识库名称
+                    logger.info(f"Knowledge base '{kb_name}' selected successfully")
+                    #yield JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' selected successfully"})
+                except Exception as e:
+                    error_message = str(e)
+                    logger.error(f"Error occurred while selecting knowledge base '{kb_name}': {error_message}")
+                    return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
+            else:
+                try:
+                    os.makedirs(kb_dir, exist_ok=True)
+                    kb_state.kb = KnowledgeBase(kb_name, embeddings)
+                    kb_state.kb_vectordb = None
+                    kb_state.history = []
+                    kb_state.unfilter_context = []
+                    kb_state.searcher_from_target_doc = None
+                    kb_state.current_kb_name = kb_name  # 更新当前知识库名称
+                    logger.info(f"Knowledge base '{kb_name}' created successfully")
+                    #return JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' created successfully"})
+                except Exception as e:
+                    error_message = str(e)
+                    logger.error(f"Error occurred while creating knowledge base '{kb_name}': {error_message}")
+                    return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
+    except Exception as e:
+        error_message = str(e)
+        logger.error(f"An unexpected error occurred: {error_message}")
+        raise HTTPException(status_code=500, detail={"code": 500, "message":f"An unexpected error occurred: {error_message}"})
 ###############################################################
     try:
+        # 若尚未构建向量库，直接返回空的引导问题以避免 500
+        if kb_state.kb_vectordb is None:
+            logger.warning(f"Vector DB not available for knowledge base '{kb_state.current_kb_name}'. Returning empty guiding questions.")
+            return JSONResponse(status_code=200, content={"code": 200, "guiding_questions": []})
+
         guiding_questions = generate_guiding_questions()
         logger.info("Guiding questions generated successfully")
         return JSONResponse(status_code=200, content={"code": 200, "guiding_questions": guiding_questions})
@@ -318,7 +420,7 @@ async def remove_file_api(kb_name: str = Form(...), file_name: str = Form(...)):
         raise HTTPException(status_code=500, detail={"code": 500,"message": f"Knowledge base '{kb_name}' does not exist"})
     
     try:
-        kb = KnowledgeBase(kb_name, KB_DIR)
+        kb = KnowledgeBase(kb_name, get_embeddings())
         result = await kb.remove_file(file_name)
         logger.info(f"File '{file_name}' removed successfully from knowledge base '{kb_name}'")
         return JSONResponse(status_code=200, content={"code": 200, "message": result})
@@ -341,8 +443,14 @@ async def run_llm_mulitdoc_qa_api(request: Request):
         print(kb_name)
         messages = prompt_request.messages
         temperature = prompt_request.temperature
-        prompt_template_from_user = messages[0].content
-        query = messages[1:]
+        # 正确处理消息内容
+        if len(messages) > 0:
+            prompt_template_from_user = messages[0].content
+        else:
+            prompt_template_from_user = ""
+        
+        # 将整个messages列表传递给函数，而不是切片
+        query = messages
         only_chatKBQA = prompt_request.only_chatKBQA
         multiple_dialogue = prompt_request.multiple_dialogue
         derivation = prompt_request.derivation
@@ -362,13 +470,18 @@ async def run_llm_mulitdoc_qa_api(request: Request):
         
                 if os.path.exists(kb_dir):
                     try:
-                        kb_state.current_kb_name = kb_name  # 更新当前知识库名称
-                        kb_state.kb = KnowledgeBase(kb_name, embeddings)
+                        kb_state.current_kb_name = kb_name
+                        kb_state.kb = KnowledgeBase(kb_name, get_embeddings())
                         kb_state.kb_vectordb = await kb_state.kb.load_vectordb()
-                        # kb_state.kb_vectordb = kb_state.kb.load_vectordb()
                         kb_state.history = []
-                        kb_state.unfilter_context = [doc for doc_id, doc in kb_state.kb_vectordb.docstore._dict.items()]
-                        kb_state.searcher_from_target_doc = BM25Search(kb_state.unfilter_context)
+                        # 防御：向量库可能尚未创建
+                        if kb_state.kb_vectordb is not None:
+                            kb_state.unfilter_context = [doc for doc_id, doc in kb_state.kb_vectordb.docstore._dict.items()]
+                            kb_state.searcher_from_target_doc = BM25Search(kb_state.unfilter_context)
+                        else:
+                            kb_state.unfilter_context = []
+                            kb_state.searcher_from_target_doc = None
+                            logger.warning(f"Vector DB not available for knowledge base '{kb_name}'. Proceeding without KB context.")
                         
                         print("重新加载成功1")
                         logger.info(f"Knowledge base '{kb_name}' selected successfully")
@@ -382,7 +495,7 @@ async def run_llm_mulitdoc_qa_api(request: Request):
                     try:
                         kb_state.current_kb_name = kb_name  # 更新当前知识库名称
                         os.makedirs(kb_dir, exist_ok=True)
-                        kb_state.kb = KnowledgeBase(kb_name, embeddings)
+                        kb_state.kb = KnowledgeBase(kb_name, get_embeddings())
                         kb_state.kb_vectordb = None
                         kb_state.history = []
                         kb_state.unfilter_context = []
@@ -396,22 +509,69 @@ async def run_llm_mulitdoc_qa_api(request: Request):
                         logger.error(f"Error occurred while creating knowledge base '{kb_name}': {error_message}")
                         return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
             
-            result_generator = run_llm_MulitDocQA(query, only_chatKBQA, prompt_template_from_user, temperature, multiple_dialogue, derivation, show_source)
+            # 当向量库不可用时，回退为仅LLM对话，避免 500
+            if kb_state.kb_vectordb is None:
+                logger.warning(f"KB '{kb_name}' has no vector DB; answering without KB context.")
+                result_generator = only_llm(query, only_chatKBQA, prompt_template_from_user, temperature, multiple_dialogue, derivation, show_source)
+            else:
+                result_generator = run_llm_MulitDocQA(query, only_chatKBQA, prompt_template_from_user, temperature, multiple_dialogue, derivation, show_source)
         else:
             result_generator = only_llm(query, only_chatKBQA, prompt_template_from_user, temperature, multiple_dialogue, derivation, show_source)
 
-        async def output_generator():
-            yield stream_type(None)
-            response_text = ""
-            for chunk in result_generator:
-                decoded_chunk = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
-                response_text += decoded_chunk
-                yield chunk
-                await asyncio.sleep(0)
-            yield "data: [DONE]\n\n"
+        # 如果客户端支持流式（SSE），按流式返回；否则聚合为一次性 JSON 返回
+        stream = getattr(prompt_request, "stream", True)
+        if stream:
+            async def output_generator():
+                yield stream_type(None)
+                response_text = ""
+                for chunk in result_generator:
+                    decoded_chunk = chunk.decode('utf-8') if isinstance(chunk, bytes) else chunk
+                    response_text += decoded_chunk
+                    yield chunk
+                    await asyncio.sleep(0)
+                yield "data: [DONE]\n\n"
 
-        logger.info("Request processed successfully")
-        return StreamingResponse(output_generator(), media_type="text/event-stream")
+            logger.info("Request processed successfully")
+            # 添加禁用缓冲的响应头，确保反向代理和浏览器即时刷新 SSE 内容
+            return StreamingResponse(
+                output_generator(),
+                media_type="text/event-stream",
+                headers={
+                    "Cache-Control": "no-cache",
+                    "X-Accel-Buffering": "no"
+                }
+            )
+        else:
+            # 非流式聚合：解析 SSE payload 提取文本
+            aggregated_text = ""
+            sources = []
+            for chunk in result_generator:
+                decoded_chunk = chunk.decode('utf-8') if isinstance(chunk, bytes) else str(chunk)
+                if not decoded_chunk.startswith("data: "):
+                    continue
+                payload = decoded_chunk[len("data: "):].strip()
+                try:
+                    obj = json.loads(payload)
+                    delta = obj.get("choices", [{}])[0].get("delta", {})
+                    content = delta.get("content")
+                    if content:
+                        aggregated_text += content
+                    file_url = delta.get("file_url")
+                    if show_source and file_url:
+                        sources.append(file_url)
+                except Exception:
+                    # 跳过异常的 SSE 片段
+                    continue
+
+            logger.info("Request processed successfully (non-stream)")
+            return JSONResponse(status_code=200, content={
+                "code": 200,
+                "message": "success",
+                "data": {
+                    "answer": aggregated_text,
+                    "sources": sources if show_source else None
+                }
+            })
 
     except Exception as e:
         error_message = str(e)
@@ -491,7 +651,7 @@ async def run_llm_Knowlege_baes_file_QA_api(request: Request):
             print("====")
             raise HTTPException(status_code=500, detail={"code": 500, "message": "Your content contains sensitive information. Please rephrase your question."})
         else:
-            raise HTTPException(status_code=500, detail={"code": 500, "message": f"An unexpected error occurred: {s}"})
+            raise HTTPException(status_code=500, detail={"code": 500, "message": f"An unexpected error occurred: {error_message}"})
 
 
 def custom_openapi():

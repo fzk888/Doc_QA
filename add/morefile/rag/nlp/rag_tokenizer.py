@@ -20,6 +20,7 @@ import os
 import re
 import string
 import sys
+import logging
 
 # 尝试导入 datrie，如果失败则使用字典作为备选
 try:
@@ -45,12 +46,69 @@ except ImportError:
         def load(file_path):
             # 模拟 load 方法，返回空的 DummyTrie 实例
             return DummyTrie()
+            
+        def has_keys_with_prefix(self, prefix):
+            # 检查是否有以指定前缀开始的键
+            for key in self.keys():
+                if key.startswith(prefix):
+                    return True
+            return False
     
     datrie = type('datrie', (), {'Trie': DummyTrie})
+
+logger = logging.getLogger("docqa")
+
+# 尝试导入jieba分词
+try:
+    import jieba
+    # 降低jieba日志等级，避免启动时冗余输出
+    try:
+        jieba.setLogLevel(logging.ERROR)
+    except Exception:
+        pass
+    # 不强制预加载，避免初始化阶段的前缀词典输出
+    # jieba.initialize()
+except ImportError:
+    jieba = None
+    # 静默处理为调试日志，默认不输出到终端
+    logger.debug("[HUQIE]: jieba not found. Using regex-based tokenization.")
+
 from hanziconv import HanziConv
 from huggingface_hub import snapshot_download
+
+# 尝试下载并初始化NLTK资源
+def init_nltk_resources():
+    try:
+        import nltk
+        from nltk.stem import PorterStemmer, WordNetLemmatizer
+        # 尝试加载资源
+        nltk.data.find('corpora/wordnet')
+        # 尝试加载punkt资源
+        try:
+            nltk.data.find('tokenizers/punkt_tab')
+        except LookupError:
+            try:
+                nltk.data.find('tokenizers/punkt')
+            except LookupError:
+                pass  # 如果都找不到，继续使用备用方案
+        return PorterStemmer, WordNetLemmatizer
+    except LookupError:
+        # 使用备用方案，避免尝试下载NLTK资源
+        logger.debug("[HUQIE]: NLTK resources not found. Using fallback implementations")
+        
+        class DummyWordNetLemmatizer:
+            def lemmatize(self, word):
+                return word
+
+        class DummyPorterStemmer:
+            def stem(self, word):
+                return word
+        
+        return DummyPorterStemmer, DummyWordNetLemmatizer
+
+PorterStemmer, WordNetLemmatizer = init_nltk_resources()
 from nltk import word_tokenize
-from nltk.stem import PorterStemmer, WordNetLemmatizer
+
 from add.morefile.api.utils.file_utils import get_project_base_directory
 
 
@@ -62,7 +120,7 @@ class RagTokenizer:
         return str(("DD" + (line[::-1].lower())).encode("utf-8"))[2:-1]
 
     def loadDict_(self, fnm):
-        print("[HUQIE]:Build trie", fnm, file=sys.stderr)
+        logger.debug("[HUQIE]:Build trie %s", fnm)
         try:
             of = open(fnm, "r", encoding='utf-8')
             while True:
@@ -79,7 +137,7 @@ class RagTokenizer:
             self.trie_.save(fnm + ".trie")
             of.close()
         except Exception as e:
-            print("[HUQIE]:Faild to build trie, ", fnm, e, file=sys.stderr)
+            logger.debug("[HUQIE]:Faild to build trie, %s, %s", fnm, e)
 
     def __init__(self, debug=False):
         self.DEBUG = debug
@@ -87,15 +145,17 @@ class RagTokenizer:
         self.trie_ = datrie.Trie(string.printable)
         self.DIR_ = os.path.join(get_project_base_directory(), "rag/res", "huqie")
 
-        self.stemmer = PorterStemmer()
-        self.lemmatizer = WordNetLemmatizer()
+        # 初始化NLTK组件并处理可能的资源缺失
+        PorterStemmerClass, WordNetLemmatizerClass = init_nltk_resources()
+        self.stemmer = PorterStemmerClass()
+        self.lemmatizer = WordNetLemmatizerClass()
 
         self.SPLIT_CHAR = r"([ ,\.<>/?;'\[\]\\`!@#$%^&*\(\)\{\}\|_+=《》，。？、；‘’：“”【】~！￥%……（）——-]+|[a-z\.-]+|[0-9,\.-]+)"
         try:
             self.trie_ = datrie.Trie.load(self.DIR_ + ".txt.trie")
             return
         except Exception as e:
-            print("[HUQIE]:Build default trie", file=sys.stderr)
+            logger.debug("[HUQIE]:Build default trie")
             self.trie_ = datrie.Trie(string.printable)
 
         self.loadDict_(self.DIR_ + ".txt")
@@ -289,7 +349,15 @@ class RagTokenizer:
         line = self._tradi2simp(line)
         zh_num = len([1 for c in line if is_chinese(c)])
         if zh_num == 0:
-            return " ".join([self.stemmer.stem(self.lemmatizer.lemmatize(t)) for t in word_tokenize(line)])
+            # 处理英文文本，增强错误处理
+            try:
+                from nltk.tokenize import word_tokenize
+                return " ".join([self.stemmer.stem(self.lemmatizer.lemmatize(t)) for t in word_tokenize(line)])
+            except Exception as e:
+                # 如果NLTK不可用，使用简单的正则表达式分词
+                logger.debug("[HUQIE]: NLTK tokenization failed, using regex fallback: %s", e)
+                tokens = re.findall(r'\b\w+\b', line)
+                return " ".join([self.stemmer.stem(self.lemmatizer.lemmatize(t)) for t in tokens])
 
         arr = re.split(self.SPLIT_CHAR, line)
         res = []
@@ -381,6 +449,14 @@ class RagTokenizer:
 
         return " ".join(self.english_normalize_(res))
 
+    def jieba_tokenize(self, text):
+        """使用jieba分词进行分词"""
+        if jieba is None:
+            # 如果没有jieba，使用正则表达式进行简单分词
+            tokens = re.findall(r'[\w]+', text)
+            return ' '.join(tokens)
+        return ' '.join(jieba.cut(text))
+
 
 def is_chinese(s):
     if s >= u'\u4e00' and s <= u'\u9fa5':
@@ -423,12 +499,13 @@ loadUserDict = tokenizer.loadUserDict
 addUserDict = tokenizer.addUserDict
 tradi2simp = tokenizer._tradi2simp
 strQ2B = tokenizer._strQ2B
+jieba_tokenize = tokenizer.jieba_tokenize
 
 if __name__ == '__main__':
     tknzr = RagTokenizer(debug=True)
     # huqie.addUserDict("/tmp/tmp.new.tks.dict")
     tks = tknzr.tokenize(
-        "哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈")
+        "哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈哈")
     print(tknzr.fine_grained_tokenize(tks))
     tks = tknzr.tokenize(
         "公开征求意见稿提出，境外投资者可使用自有人民币或外汇投资。使用外汇投资的，可通过债券持有人在香港人民币业务清算行及香港地区经批准可进入境内银行间外汇市场进行交易的境外人民币业务参加行（以下统称香港结算行）办理外汇资金兑换。香港结算行由此所产生的头寸可到境内银行间外汇市场平盘。使用外汇投资的，在其投资的债券到期或卖出后，原则上应兑换回外汇。")

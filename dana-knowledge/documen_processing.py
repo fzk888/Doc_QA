@@ -7,13 +7,30 @@ from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharact
 from langchain_community.document_loaders import TextLoader
 from langchain.schema import Document
 import pypandoc
+import logging
 from pypdf import PdfReader
 import requests
+from docx import Document as Document2
 def is_valid_table(table_df, min_char_count=120):
     total_char_count = sum(len(str(cell)) for _, row in table_df.iterrows() for cell in row)
     if total_char_count < min_char_count:
         return False
     return True
+
+# Ensure pandoc is available for pypandoc on Windows
+def _ensure_pandoc_installed():
+    try:
+        pypandoc.get_pandoc_version()
+    except OSError:
+        try:
+            logging.warning("Pandoc not found. Attempting to download via pypandoc...")
+            pypandoc.download_pandoc()
+            logging.info("Pandoc downloaded successfully for pypandoc.")
+        except Exception as e:
+            # Do NOT raise here; allow runtime fallback to python-docx
+            logging.error(f"Failed to download pandoc automatically: {e}. Will fallback to python-docx text extraction.")
+
+_ensure_pandoc_installed()
 def extract_all_table_and_textand_image(pdf_path, out_path_md,image_dir):
     pdf = pdfplumber.open(pdf_path)
 
@@ -172,7 +189,20 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
             os.makedirs(media_dir, exist_ok=True)
             
             # 将 .docx 文件转换为 Markdown，提取的媒体文件保存在 media_dir 中
-            markdown_text = pypandoc.convert_file(doc_file, 'markdown', extra_args=['--extract-media=' + media_dir])
+            # If pandoc is unavailable or conversion fails, fallback to python-docx
+            try:
+                markdown_text = pypandoc.convert_file(doc_file, 'markdown', extra_args=['--extract-media=' + media_dir])
+            except Exception as e:
+                logging.warning(f"Pandoc conversion failed for {doc_file}: {e}. Falling back to python-docx paragraphs.")
+                try:
+                    docu = Document2(doc_file)
+                    markdown_text = ""
+                    for p in docu.paragraphs:
+                        text = p.text.strip()
+                        markdown_text += (text + "\n") if text else "\n"
+                except Exception as e2:
+                    logging.error(f"python-docx fallback also failed for {doc_file}: {e2}.")
+                    markdown_text = ""
             
             # 生成 Markdown 文件的路径
             markdown_file = os.path.join(markdown_directory, os.path.splitext(os.path.basename(doc_file))[0] + ".md")
@@ -227,9 +257,8 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                 split_contents = split_text_preserving_tables(original_content)
                 md_header_splits = [Document(page_content=chunk, metadata={"file_path": doc_file}) for chunk in split_contents]
         
-        except RuntimeError as e:
-            print(f"转换文件 {doc_file} 时出错：{str(e)}")
-            print("跳过该文件,继续处理下一个文件。")
+        except Exception as e:
+            logging.error(f"处理 {doc_file} 发生错误: {e}. 跳过该文件。")
     
     return md_header_splits
 

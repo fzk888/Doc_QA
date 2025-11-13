@@ -36,3 +36,4 @@ python-pptx
 readability
 html_text
 chardet
+python-multipart

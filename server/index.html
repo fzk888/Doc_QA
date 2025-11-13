@@ -1,0 +1,854 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>知识库智能问答系统</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        :root {
+            --primary: #3b82f6;
+            --primary-dark: #2563eb;
+            --primary-light: #dbeafe;
+            --success: #10b981;
+            --danger: #ef4444;
+            --gray-50: #f9fafb;
+            --gray-100: #f3f4f6;
+            --gray-200: #e5e7eb;
+            --gray-300: #d1d5db;
+            --gray-600: #4b5563;
+            --gray-700: #374151;
+            --gray-900: #111827;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: var(--gray-900);
+            min-height: 100vh;
+            overflow: hidden;
+        }
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+        .sidebar {
+            width: 360px;
+            background: white;
+            border-right: 1px solid var(--gray-200);
+            display: flex;
+            flex-direction: column;
+            box-shadow: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            transition: transform 0.3s;
+            z-index: 100;
+            overflow-y: auto;
+        }
+        .sidebar.collapsed {
+            transform: translateX(-100%);
+            position: absolute;
+            left: 0;
+        }
+        .sidebar-header {
+            padding: 24px 20px;
+            border-bottom: 1px solid var(--gray-200);
+            background: linear-gradient(135deg, rgba(59, 130, 246, 0.05) 0%, rgba(139, 92, 246, 0.05) 100%);
+        }
+        .sidebar-header h1 {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--gray-900);
+        }
+        .sidebar-header p {
+            font-size: 12px;
+            color: var(--gray-600);
+        }
+        .sidebar-content { flex: 1; padding: 20px; overflow-y: auto; }
+        .sidebar-section { margin-bottom: 28px; }
+        .section-title {
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+            color: var(--gray-600);
+            margin-bottom: 12px;
+        }
+        .form-group { margin-bottom: 16px; }
+        label {
+            display: block;
+            font-size: 13px;
+            font-weight: 600;
+            color: var(--gray-700);
+            margin-bottom: 6px;
+        }
+        input[type="text"], textarea {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--gray-300);
+            border-radius: 6px;
+            font-size: 13px;
+            font-family: inherit;
+        }
+        input[type="text"]:focus, textarea:focus {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+        }
+        .btn {
+            padding: 10px 14px;
+            border: none;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 100%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            gap: 6px;
+        }
+        .btn-primary { background: var(--primary); color: white; }
+        .btn-primary:hover { background: var(--primary-dark); }
+        .btn-success { background: var(--success); color: white; }
+        .btn-danger { background: var(--danger); color: white; }
+        .btn-group {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 8px;
+        }
+        .kb-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-height: 200px;
+            overflow-y: auto;
+        }
+        .kb-item {
+            padding: 12px;
+            background: var(--gray-100);
+            border: 1px solid var(--gray-200);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 13px;
+            transition: all 0.2s;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .kb-item:hover {
+            background: var(--primary-light);
+            border-color: var(--primary);
+        }
+        .kb-item.selected {
+            background: var(--primary);
+            color: white;
+            border-color: var(--primary);
+            font-weight: 600;
+        }
+        .kb-item-delete {
+            background: none;
+            border: none;
+            color: var(--danger);
+            cursor: pointer;
+            font-size: 16px;
+            padding: 0;
+            display: none;
+        }
+        .kb-item:hover .kb-item-delete { display: block; }
+        .guiding-questions {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .guiding-question {
+            padding: 10px 12px;
+            background: var(--primary-light);
+            border: 1px solid rgba(59, 130, 246, 0.3);
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 12px;
+            line-height: 1.5;
+            transition: all 0.2s;
+            color: var(--gray-700);
+        }
+        .guiding-question:hover {
+            background: rgba(59, 130, 246, 0.15);
+            border-color: var(--primary);
+        }
+        .empty-state {
+            padding: 20px;
+            text-align: center;
+            color: #9ca3af;
+            font-size: 12px;
+        }
+        .main {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            background: var(--gray-50);
+            overflow: hidden;
+        }
+        .main-header {
+            padding: 20px 30px;
+            background: white;
+            border-bottom: 1px solid var(--gray-200);
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+        .main-header-title h2 {
+            font-size: 22px;
+            font-weight: 700;
+            color: var(--gray-900);
+        }
+        .main-header-title p {
+            font-size: 12px;
+            color: var(--gray-600);
+            margin-top: 2px;
+        }
+        .current-kb-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 6px 12px;
+            background: var(--primary-light);
+            border: 1px solid var(--primary);
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--primary-dark);
+        }
+        .current-kb-badge.empty { display: none; }
+        .chat-area { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+        .chat-history {
+            flex: 1;
+            overflow-y: auto;
+            padding: 30px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+        .message {
+            display: flex;
+            gap: 12px;
+            animation: slideUp 0.3s ease-out;
+        }
+        @keyframes slideUp {
+            from { opacity: 0; transform: translateY(10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .message.user { flex-direction: row-reverse; }
+        .message-avatar {
+            width: 32px;
+            height: 32px;
+            border-radius: 50%;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 16px;
+            flex-shrink: 0;
+        }
+        .message.assistant .message-avatar {
+            background: linear-gradient(135deg, var(--primary) 0%, #8b5cf6 100%);
+            color: white;
+        }
+        .message.user .message-avatar {
+            background: var(--gray-300);
+            color: var(--gray-700);
+        }
+        .message-content {
+            max-width: 70%;
+            padding: 12px 16px;
+            border-radius: 12px;
+            font-size: 14px;
+            line-height: 1.6;
+            word-wrap: break-word;
+        }
+        .message.assistant .message-content {
+            background: white;
+            color: var(--gray-900);
+            border: 1px solid var(--gray-200);
+        }
+        .message.user .message-content {
+            background: var(--primary);
+            color: white;
+        }
+        .message-content pre {
+            background: #f6f8fa;
+            border-radius: 6px;
+            padding: 16px;
+            overflow: auto;
+            margin: 8px 0;
+            border: 1px solid #e1e4e8;
+        }
+        .message-content code {
+            background: #f6f8fa;
+            padding: 2px 4px;
+            border-radius: 3px;
+            font-size: 12px;
+            border: 1px solid #e1e4e8;
+        }
+        .message-content pre code {
+            background: none;
+            padding: 0;
+            border: none;
+        }
+        .message-content blockquote {
+            border-left: 4px solid #dfe2e5;
+            padding: 0 1em;
+            color: #6a737d;
+            margin: 8px 0;
+        }
+        .message-content ul, .message-content ol {
+            padding-left: 2em;
+            margin: 8px 0;
+        }
+        .message-content li {
+            margin-bottom: 4px;
+        }
+        .message-content h1, .message-content h2, .message-content h3 {
+            margin: 12px 0 8px 0;
+        }
+        .message-content h1 {
+            font-size: 1.5em;
+            border-bottom: 1px solid #eaecef;
+            padding-bottom: 0.3em;
+        }
+        .message-content h2 {
+            font-size: 1.25em;
+            border-bottom: 1px solid #eaecef;
+            padding-bottom: 0.3em;
+        }
+        .message-content h3 {
+            font-size: 1.1em;
+        }
+        .message-content table {
+            border-collapse: collapse;
+            width: 100%;
+            margin: 8px 0;
+        }
+        .message-content th, .message-content td {
+            border: 1px solid #dfe2e5;
+            padding: 6px 13px;
+        }
+        .message-content th {
+            background-color: #f6f8fa;
+            font-weight: 600;
+        }
+        .message-content tr:nth-child(2n) {
+            background-color: #f6f8fa;
+        }
+        .loading-dots {
+            display: inline-flex;
+            gap: 4px;
+        }
+        .loading-dot {
+            width: 6px;
+            height: 6px;
+            border-radius: 50%;
+            background: var(--primary);
+            animation: loading 1.4s infinite;
+        }
+        .loading-dot:nth-child(2) { animation-delay: 0.2s; }
+        .loading-dot:nth-child(3) { animation-delay: 0.4s; }
+        @keyframes loading {
+            0%, 60%, 100% { opacity: 0.3; }
+            30% { opacity: 1; }
+        }
+        .chat-input-area {
+            padding: 20px 30px;
+            background: white;
+            border-top: 1px solid var(--gray-200);
+            display: flex;
+            gap: 10px;
+        }
+        .chat-input-wrapper { flex: 1; }
+        .chat-input-wrapper textarea {
+            flex: 1;
+            max-height: 100px;
+            min-height: 40px;
+        }
+        .btn-send {
+            padding: 10px 20px;
+            background: var(--primary);
+            color: white;
+            border: none;
+            border-radius: 6px;
+            font-weight: 600;
+            cursor: pointer;
+            height: 100%;
+        }
+        .btn-send:hover { background: var(--primary-dark); }
+        .notification {
+            position: fixed;
+            top: 20px;
+            right: 20px;
+            padding: 14px 18px;
+            border-radius: 8px;
+            color: white;
+            font-size: 13px;
+            font-weight: 600;
+            z-index: 1000;
+            display: none;
+        }
+        .notification.success { background: var(--success); }
+        .notification.error { background: var(--danger); }
+        .file-upload-area {
+            border: 2px dashed var(--gray-300);
+            border-radius: 8px;
+            padding: 20px;
+            text-align: center;
+            cursor: pointer;
+            transition: all 0.2s;
+            background: var(--gray-50);
+        }
+        .file-upload-area:hover {
+            border-color: var(--primary);
+            background: var(--primary-light);
+        }
+        .file-upload-area input[type="file"] { display: none; }
+        .selected-files {
+            margin-top: 12px;
+            padding-top: 12px;
+            border-top: 1px solid var(--gray-300);
+            text-align: left;
+        }
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 6px 0;
+            font-size: 12px;
+            color: var(--gray-600);
+        }
+        @media (max-width: 768px) {
+            .container { flex-direction: column; }
+            .sidebar { width: 100%; max-height: 50vh; }
+            .message-content { max-width: 90%; }
+            .btn-group { grid-template-columns: 1fr; }
+        }
+    </style>
+    <!-- 引入 marked.js 和 highlight.js CDN -->
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css">
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js"></script>
+    <script>window.hljs && hljs.highlightAll();</script>
+</head>
+<body>
+    <div class="container">
+        <aside class="sidebar">
+            <div class="sidebar-header">
+                <h1>知识库助手</h1>
+                <p>智能文档问答系统</p>
+            </div>
+            <div class="sidebar-content">
+                <div class="sidebar-section">
+                    <div class="section-title">知识库管理</div>
+                    <div class="form-group">
+                        <label>知识库名称</label>
+                        <input type="text" id="kbNameInput" placeholder="输入知识库名称">
+                    </div>
+                    <button class="btn btn-primary" id="browseSidebarBtn"> 选择知识库</button>
+                    <div id="kbListContainer" style="display: none; margin-top: 12px;">
+                        <label style="margin-bottom: 8px;">选择已有知识库</label>
+                        <div class="kb-list" id="kbList"></div>
+                    </div>
+                </div>
+                <div class="sidebar-section">
+                    <div class="section-title">上传文档</div>
+                    <div class="file-upload-area" id="fileUploadArea">
+                        <div style="font-size: 28px; margin-bottom: 8px;">📁</div>
+                        <div class="file-upload-text" style="font-size: 13px; color: var(--gray-600);">点击或拖拽文件</div>
+                        <input type="file" id="fileInput" multiple>
+                        <div class="selected-files" id="selectedFiles" style="display: none;"></div>
+                    </div>
+                </div>
+                <div class="sidebar-section">
+                    <div class="btn-group">
+                        <button class="btn btn-success" id="createKbBtn"> 创建/更新知识库</button>
+                        <button class="btn btn-danger" id="deleteKbBtn"> 删除知识库</button>
+                    </div>
+                </div>
+                <div class="sidebar-section">
+                    <div class="section-title">推荐问题</div>
+                    <button class="btn btn-primary" id="generateQuestionsBtn" style="margin-bottom: 12px;"> 生成引导问题</button>
+                    <div id="guidingQuestionsContainer" style="display: none;">
+                        <div id="guidingQuestions" class="guiding-questions"></div>
+                    </div>
+                    <div id="emptyQuestions" class="empty-state" style="display: none;">暂无推荐问题</div>
+                </div>
+            </div>
+        </aside>
+        <main class="main">
+            <header class="main-header">
+                <div class="main-header-title">
+                    <h2>智能问答</h2>
+                    <p>基于您的知识库进行智能回答</p>
+                </div>
+                <div class="current-kb-badge empty" id="currentKbBadge">
+                    当前知识库：<span id="currentKbName"></span>
+                </div>
+            </header>
+            <div class="chat-area">
+                <div class="chat-history" id="chatHistory">
+                    <div class="message assistant">
+                        <div class="message-avatar">🤖</div>
+                        <div class="message-content">欢迎使用知识库智能问答系统！请先在左侧选择或创建一个知识库。</div>
+                    </div>
+                </div>
+                <div class="chat-input-area">
+                    <div class="chat-input-wrapper">
+                        <textarea id="questionInput" placeholder="输入问题...（Enter 发送）"></textarea>
+                    </div>
+                    <button class="btn-send" id="sendBtn">发送</button>
+                </div>
+            </div>
+        </main>
+    </div>
+    <div id="notification" class="notification"></div>
+    <script>
+        const API_BASE = 'http://127.0.0.1:7861';
+        const elements = {
+            sidebar: document.querySelector('.sidebar'),
+            kbNameInput: document.getElementById('kbNameInput'),
+            browseSidebarBtn: document.getElementById('browseSidebarBtn'),
+            kbListContainer: document.getElementById('kbListContainer'),
+            kbList: document.getElementById('kbList'),
+            fileUploadArea: document.getElementById('fileUploadArea'),
+            fileInput: document.getElementById('fileInput'),
+            selectedFiles: document.getElementById('selectedFiles'),
+            createKbBtn: document.getElementById('createKbBtn'),
+            deleteKbBtn: document.getElementById('deleteKbBtn'),
+            generateQuestionsBtn: document.getElementById('generateQuestionsBtn'),
+            guidingQuestionsContainer: document.getElementById('guidingQuestionsContainer'),
+            guidingQuestions: document.getElementById('guidingQuestions'),
+            emptyQuestions: document.getElementById('emptyQuestions'),
+            chatHistory: document.getElementById('chatHistory'),
+            questionInput: document.getElementById('questionInput'),
+            sendBtn: document.getElementById('sendBtn'),
+            currentKbBadge: document.getElementById('currentKbBadge'),
+            currentKbName: document.getElementById('currentKbName'),
+            notification: document.getElementById('notification')
+        };
+        let currentKB = null;
+        let selectedFiles = [];
+        function showNotification(msg, type = 'info') {
+            elements.notification.textContent = msg;
+            elements.notification.className = 'notification ' + type;
+            elements.notification.style.display = 'block';
+            setTimeout(() => { elements.notification.style.display = 'none'; }, 3000);
+        }
+        elements.browseSidebarBtn.addEventListener('click', async () => {
+            elements.kbListContainer.style.display = elements.kbListContainer.style.display === 'none' ? 'block' : 'none';
+            if (elements.kbListContainer.style.display === 'block') await fetchKBList();
+        });
+        async function fetchKBList() {
+            try {
+                const res = await fetch(API_BASE + '/list_kb');
+                const data = await res.json();
+                elements.kbList.innerHTML = '';
+                if (data.data?.length) {
+                    data.data.forEach((kb, idx) => {
+                        const item = document.createElement('div');
+                        item.className = 'kb-item' + (kb === currentKB ? ' selected' : '');
+                        item.innerHTML = `
+                            <span>${kb}</span>
+                            <button class="kb-item-delete" title="删除知识库">&#128465;</button>
+                        `;
+                        item.onclick = () => selectKB(kb);
+                        item.querySelector('.kb-item-delete').onclick = (e) => {
+                            e.stopPropagation();
+                            deleteKB(kb);
+                        };
+                        elements.kbList.appendChild(item);
+                    });
+                } else {
+                    elements.kbList.innerHTML = '<div class="empty-state">暂无知识库</div>';
+                }
+            } catch (e) { 
+                elements.kbList.innerHTML = '<div class="empty-state">获取列表失败</div>';
+                showNotification('获取列表失败', 'error'); 
+            }
+        }
+        async function selectKB(kb) {
+            currentKB = kb;
+            elements.kbNameInput.value = kb;
+            updateCurrentKBDisplay();
+            await generateGuidingQuestions();
+            showNotification('已选择：' + kb, 'success');
+            // 更新知识库列表中的选中状态
+            document.querySelectorAll('.kb-item').forEach(item => {
+                if (item.textContent.trim().startsWith(kb)) {
+                    item.classList.add('selected');
+                } else {
+                    item.classList.remove('selected');
+                }
+            });
+        }
+        async function deleteKB(kb) {
+            if (!confirm('确定删除？')) return;
+            try {
+                const fd = new FormData();
+                fd.append('kb_name', kb);
+                const res = await fetch(API_BASE + '/delete_kb', { method: 'POST', body: fd });
+                if (res.ok) {
+                    showNotification('已删除', 'success');
+                    if (currentKB === kb) { currentKB = null; updateCurrentKBDisplay(); }
+                    await fetchKBList();
+                } else {
+                    const data = await res.json();
+                    showNotification('删除失败：' + (data.message || '未知错误'), 'error');
+                }
+            } catch (e) { showNotification('删除失败', 'error'); }
+        }
+        function updateCurrentKBDisplay() {
+            if (currentKB) {
+                elements.currentKbBadge.classList.remove('empty');
+                elements.currentKbName.textContent = currentKB;
+            } else {
+                elements.currentKbBadge.classList.add('empty');
+                elements.currentKbName.textContent = '';
+            }
+        }
+        elements.fileUploadArea.addEventListener('click', () => elements.fileInput.click());
+        elements.fileUploadArea.addEventListener('dragover', e => { e.preventDefault(); });
+        elements.fileUploadArea.addEventListener('drop', e => { e.preventDefault(); handleFiles(e.dataTransfer.files); });
+        elements.fileInput.addEventListener('change', e => handleFiles(e.target.files));
+        function handleFiles(files) { selectedFiles = Array.from(files); updateSelectedFilesDisplay(); }
+        function updateSelectedFilesDisplay() {
+            if (!selectedFiles.length) { elements.selectedFiles.style.display = 'none'; return; }
+            elements.selectedFiles.style.display = 'block';
+            elements.selectedFiles.innerHTML = selectedFiles.map((f, i) =>
+                `<div class="file-item">
+                    <span>${f.name}</span>
+                    <button class="file-item-remove" title="移除文件" onclick="removeFile(${i})">&#10006;</button>
+                </div>`
+            ).join('');
+        }
+        // 修正 removeFile 的全局绑定
+        window.removeFile = function(i) { selectedFiles.splice(i, 1); updateSelectedFilesDisplay(); };
+        elements.createKbBtn.addEventListener('click', async () => {
+            const kb = elements.kbNameInput.value.trim();
+            if (!kb) { showNotification('请输入知识库名称', 'error'); return; }
+            currentKB = kb;
+            updateCurrentKBDisplay();
+            if (!selectedFiles.length) { showNotification('已选择：' + kb, 'success'); await generateGuidingQuestions(); return; }
+            try {
+                const fd = new FormData();
+                fd.append('kb_name', kb);
+                selectedFiles.forEach(f => fd.append('files', f));
+                const res = await fetch(API_BASE + '/update_vectordb', { method: 'POST', body: fd });
+                if (res.ok) {
+                    const data = await res.json();
+                    showNotification('更新成功: ' + (data.message || ''), 'success');
+                    selectedFiles = [];
+                    updateSelectedFilesDisplay();
+                    elements.fileInput.value = '';
+                    await fetchKBList();
+                    await generateGuidingQuestions();
+                } else {
+                    const data = await res.json();
+                    showNotification('失败：' + data.message, 'error');
+                }
+            } catch (e) { showNotification('更新出错', 'error'); }
+        });
+        elements.deleteKbBtn.addEventListener('click', async () => {
+            const kb = elements.kbNameInput.value.trim();
+            if (!kb) { showNotification('请输入知识库名称', 'error'); return; }
+            await deleteKB(kb);
+        });
+        async function generateGuidingQuestions() {
+            if (!currentKB) {
+                elements.guidingQuestionsContainer.style.display = 'none';
+                elements.emptyQuestions.style.display = 'block';
+                elements.guidingQuestions.innerHTML = '';
+                return;
+            }
+            try {
+                const res = await fetch(API_BASE + '/view_guiding_questions', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ kb_name: currentKB })
+                });
+                const data = await res.json();
+                if (data.guiding_questions?.length) {
+                    elements.guidingQuestions.innerHTML = data.guiding_questions.map(q =>
+                        `<div class="guiding-question" onclick="insertQuestion('${q.replace(/'/g, "\\'")}')">${q}</div>`
+                    ).join('');
+                    elements.guidingQuestionsContainer.style.display = 'block';
+                    elements.emptyQuestions.style.display = 'none';
+                } else {
+                    elements.guidingQuestionsContainer.style.display = 'none';
+                    elements.emptyQuestions.style.display = 'block';
+                    elements.guidingQuestions.innerHTML = '';
+                }
+            } catch (e) {
+                elements.guidingQuestionsContainer.style.display = 'none';
+                elements.emptyQuestions.style.display = 'block';
+                elements.guidingQuestions.innerHTML = '';
+                showNotification('生成引导问题失败', 'error');
+            }
+        }
+        elements.generateQuestionsBtn.addEventListener('click', generateGuidingQuestions);
+        window.insertQuestion = function(q) { elements.questionInput.value = q; elements.questionInput.focus(); };
+        async function sendQuestion() {
+            const q = elements.questionInput.value.trim();
+            if (!q) { showNotification('请输入问题', 'error'); return; }
+            if (!currentKB) { showNotification('请先选择知识库', 'error'); return; }
+            addMessage('user', q);
+            elements.questionInput.value = '';
+            const id = addMessage('assistant', '<div class="loading-dots"><span class="loading-dot"></span><span class="loading-dot"></span><span class="loading-dot"></span></div>');
+            let answered = false;
+            try {
+                const res = await fetch(API_BASE + '/mulitdoc_qa', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Accept': 'text/event-stream'
+                    },
+                    body: JSON.stringify({
+                        model: 'deepseek-chat',
+                        messages: [{ role: 'user', content: q }],
+                        temperature: 0.5,
+                        stream: true,
+                        only_chatKBQA: true,
+                        kb_name: currentKB,
+                        show_source: true,
+                        derivation: false
+                    })
+                });
+
+                const msg = document.getElementById('msg-' + id);
+                const contentEl = msg ? msg.querySelector('.message-content') : null;
+                if (!res.ok || !res.body) {
+                    if (msg) msg.remove();
+                    const data = await res.json().catch(() => ({}));
+                    addMessage('assistant', ' 错误：' + (data.message || '请求失败'));
+                    return;
+                }
+
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder('utf-8');
+                let buffer = '';
+                let aggregatedText = '';
+                const sources = [];
+
+                while (true) {
+                    const { value, done } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+
+                    const parts = buffer.split('\n\n');
+                    buffer = parts.pop();
+                    for (const part of parts) {
+                        if (!part.startsWith('data: ')) continue;
+                        const payload = part.slice('data: '.length).trim();
+                        if (payload === '[DONE]') { answered = true; break; }
+                        try {
+                            const obj = JSON.parse(payload);
+                            const delta = obj?.choices?.[0]?.delta || {};
+                            const text = delta.content || '';
+                            const fileUrl = delta.file_url;
+                            if (text) {
+                                aggregatedText += text;
+                                if (contentEl) {
+                                    // 将增量文本渲染为 Markdown
+                                    const html = marked.parse(aggregatedText);
+                                    contentEl.innerHTML = html;
+                                    // 对新增代码块进行高亮
+                                    contentEl.querySelectorAll('pre code').forEach((block) => {
+                                        if (!block.classList.contains('hljs')) {
+                                            try { hljs.highlightElement(block); } catch (_) {}
+                                        }
+                                    });
+                                }
+                            }
+                            if (fileUrl) sources.push(fileUrl);
+                        } catch (_) {
+                            // 忽略非 JSON 片段（如心跳等）
+                        }
+                    }
+                }
+
+                // 结束占位加载动画（若仍存在）
+                if (msg && contentEl && !aggregatedText) {
+                    msg.remove();
+                    addMessage('assistant', '暂无回答');
+                }
+                answered = true;
+            } catch (e) {
+                const msg = document.getElementById('msg-' + id);
+                if (msg) msg.remove();
+                if (!answered) {
+                    addMessage('assistant', ' 连接失败');
+                } else {
+                    showNotification('连接中断，但已收到部分回答', 'warning');
+                }
+            }
+        }
+        elements.sendBtn.addEventListener('click', sendQuestion);
+        elements.questionInput.addEventListener('keydown', e => {
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendQuestion(); }
+        });
+        function addMessage(role, content) {
+            const id = Date.now() + Math.floor(Math.random() * 1000);
+            const div = document.createElement('div');
+            div.className = 'message ' + role;
+            div.id = 'msg-' + id;
+            let avatar = role === 'assistant' ? '🤖' : '🧑';
+            let htmlContent = content;
+            
+            // 对助手消息进行Markdown解析
+            if (role === 'assistant') {
+                // 设置marked.js选项以增强渲染效果
+                marked.setOptions({
+                    highlight: function(code, lang) {
+                        if (lang && window.hljs && hljs.getLanguage(lang)) {
+                            try {
+                                return hljs.highlight(code, { language: lang }).value;
+                            } catch (__) {}
+                        }
+                        // 默认使用文本模式高亮（若不可用则直接返回原文本）
+                        if (window.hljs) {
+                            try { return hljs.highlightAuto(code).value; } catch (__) {}
+                        }
+                        return code;
+                    },
+                    langPrefix: 'hljs language-',
+                    pedantic: false,
+                    gfm: true,
+                    breaks: false,
+                    sanitize: false,
+                    smartLists: true,
+                    smartypants: false,
+                    xhtml: false
+                });
+                
+                htmlContent = marked.parse(content);
+            }
+            
+            div.innerHTML = `
+                <div class="message-avatar">${avatar}</div>
+                <div class="message-content">${htmlContent}</div>
+            `;
+            
+            elements.chatHistory.appendChild(div);
+            
+            // 对新添加的消息中的代码块进行语法高亮
+            if (role === 'assistant') {
+                if (window.hljs) {
+                    div.querySelectorAll('pre code').forEach((block) => {
+                        // 如果marked.js没有完成高亮，则在这里补上
+                        if (!block.classList.contains('hljs')) {
+                            try { hljs.highlightElement(block); } catch (_) {}
+                        }
+                    });
+                }
+            }
+            
+            // 滚动到底部
+            elements.chatHistory.scrollTop = elements.chatHistory.scrollHeight;
+            return id;
+        }
+        updateCurrentKBDisplay();
+    </script>
+</body>
+</html>

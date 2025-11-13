@@ -456,3 +456,18 @@ file_name: file_to_remove.pdf
 ## 许可证
 
 [MIT License](LICENSE)
+## 冗余代码与优化建议
+
+- 活跃后端入口：`app2.py`（提供 `/list_kb`、`/update_vectordb`、`/mulitdoc_qa` 等接口）。建议统一使用 `app2.py` 作为唯一服务入口。
+- 重复模块（建议后续清理或归档）：
+  - `functions copy.py`（重复 `functions.py`）
+  - `dana-knowledge/bm25_search.py`（重复 `bm25_search.py`）
+  - `dana-knowledge/document_reranker.py`（重复 `document_reranker.py`）
+  - `dana-knowledge/documen_processing.py`（重复 `documen_processing.py`）
+  - `app.py`（旧版服务，和 `app2.py` 功能重合）
+- 代码内优化：
+  - BM25 初始化移除 `tqdm` 进度条与无用打印，减少初始化与查询开销。
+  - 在 `functions.get_top_documents` 中通过 `file_path` 去重，并限制进入重排的候选集合大小，降低重排模型负载。
+  - 如需进一步优化，可考虑：
+    - 将 `embeddings` 与 `reranker_model` 设为惰性加载（首次请求时初始化）。
+    - BM25 支持增量更新以避免每次重建整个索引。

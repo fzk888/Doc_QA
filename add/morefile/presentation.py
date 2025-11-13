@@ -22,9 +22,27 @@ from io import BytesIO
 import zlib
 from PIL import Image
 
+# 尝试导入aspose.slides，如果失败则使用备用方案
+try:
+    import aspose.slides as slides
+    import aspose.pydrawing as drawing
+    ASPOSE_AVAILABLE = True
+except ImportError:
+    ASPOSE_AVAILABLE = False
+    print("Warning: aspose.slides not found. Using python-pptx as fallback for PPT processing.")
+
 from add.morefile.rag.nlp import tokenize, is_english
 from add.morefile.rag.nlp import rag_tokenizer
 from add.morefile.deepdoc.parser import PdfParser, PptParser, PlainParser
+
+# 尝试导入python-pptx作为备用方案
+try:
+    import pptx
+    PPTX_AVAILABLE = True
+except ImportError:
+    PPTX_AVAILABLE = False
+    print("Warning: python-pptx not found. PPT processing may be limited.")
+
 from PyPDF2 import PdfReader as pdf2_read
 
 
@@ -33,23 +51,54 @@ class Ppt(PptParser):
         txts = super().__call__(fnm, from_page, to_page)
 
         callback(0.5, "Text extraction finished.")
-        import aspose.slides as slides
-        import aspose.pydrawing as drawing
-        with open(fnm, 'rb') as f:
-            ppt_content = f.read()
+        
         imgs = []
-        with slides.Presentation(BytesIO(ppt_content)) as presentation:
-            for i, slide in enumerate(presentation.slides[from_page: to_page]):
-                buffered = BytesIO()
-                slide.get_thumbnail(
-                    0.5, 0.5).save(
-                    buffered, drawing.imaging.ImageFormat.jpeg)
-                imgs.append(Image.open(buffered))
-        assert len(imgs) == len(
-            txts), "Slides text and image do not match: {} vs. {}".format(len(imgs), len(txts))
+        if ASPOSE_AVAILABLE:
+            # 使用aspose.slides处理PPT
+            import aspose.slides as slides
+            import aspose.pydrawing as drawing
+            with open(fnm, 'rb') as f:
+                ppt_content = f.read()
+            with slides.Presentation(BytesIO(ppt_content)) as presentation:
+                for i, slide in enumerate(presentation.slides[from_page: to_page]):
+                    buffered = BytesIO()
+                    slide.get_thumbnail(
+                        0.5, 0.5).save(
+                        buffered, drawing.imaging.ImageFormat.jpeg)
+                    imgs.append(Image.open(buffered))
+        elif PPTX_AVAILABLE:
+            # 使用python-pptx作为备用方案
+            try:
+                prs = pptx.Presentation(fnm)
+                for i, slide in enumerate(prs.slides[from_page: to_page]):
+                    # 创建一个简单的占位符图像
+                    img = Image.new('RGB', (800, 600), color='white')
+                    imgs.append(img)
+            except Exception as e:
+                print(f"Warning: Failed to process PPT with python-pptx: {e}")
+                # 创建空白图像作为后备
+                for i in range(len(txts)):
+                    img = Image.new('RGB', (800, 600), color='white')
+                    imgs.append(img)
+        else:
+            # 如果都没有，创建空白图像
+            for i in range(len(txts)):
+                img = Image.new('RGB', (800, 600), color='white')
+                imgs.append(img)
+                
+        # 确保imgs和txts长度一致
+        if len(imgs) != len(txts):
+            # 如果长度不一致，用空白图像填充
+            while len(imgs) < len(txts):
+                img = Image.new('RGB', (800, 600), color='white')
+                imgs.append(img)
+            # 如果图像过多，截断
+            if len(imgs) > len(txts):
+                imgs = imgs[:len(txts)]
+                
         callback(0.9, "Image extraction finished")
         self.is_english = is_english(txts)
-        return [(txts[i], imgs[i]) for i in range(len(txts))]
+        return list(zip(txts, imgs))
 
 
 class Pdf(PdfParser):

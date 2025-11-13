@@ -3,8 +3,8 @@ paths:
   kb_dir: "./Knowledge_based"
   model_dir: "./model/bge-large-zh-v1.5"
   reranker_model_dir: "./model/bge-reranker-large/quietnight/bge-reranker-large"
-  openai_api_base: "https://gateway.danaai.net:9443/chat/"
-  openai_api_keys: "sk-5350ed9ef0af47e7ad8e19d7208ec6c9" # 请根据实际情况修改此API密钥
+  openai_api_base: "http://chatapi.littlewheat.com/v1"
+  openai_api_keys: "sk-OnYyiZA2LdcBaCpthONeRvThnfyyARev5C9xWMSk9G1hvfI0" # 请根据实际情况修改此API密钥
 
 models:
   embeddings_model: "bge-large-zh-v1.5"
@@ -13,6 +13,9 @@ models:
 
 settings:
   batch_size: 1024
-  device: "cuda"
+  device: "cpu"
   normalize_embeddings: true
   use_fp16: true
+
+system:
+  max_workers: 4

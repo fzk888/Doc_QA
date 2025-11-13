@@ -1,8 +1,10 @@
 from add.morefile.presentation import chunk
 import sys
 import os
+import traceback
 from langchain_community.document_loaders import TextLoader
 from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain.schema import Document
 
 def dummy(a, b):
     pass
@@ -13,7 +15,8 @@ def precess_result(r,image_output_dir):
         content += i['content_with_weight']
         image_dir = image_output_dir + '/' + str(n) + '.jpg'
         content += str([image_dir])
-        i['image'].save(image_dir)
+        if 'image' in i and i['image']:
+            i['image'].save(image_dir)
         content += '***ppt换页识别符号***'
     return content
 
@@ -93,8 +96,10 @@ def process_ppt_file(ppt_file, image_output_dir, markdown_directory):
                 split_contents = split_text_preserving_tables(original_content)
                 md_header_splits = [Document(page_content=chunk, metadata={"file_path": ppt_file}) for chunk in split_contents]
         
-        except RuntimeError as e:
-            print(f"转换文件 {ppt_file} 时出错：{str(e)}")
-            print("跳过该文件,继续处理下一个文件。")
+        except Exception as e:
+            error_msg = f"转换文件 {ppt_file} 时出错：{str(e)}\n{traceback.format_exc()}"
+            print(error_msg)
+            # 抛出异常以便上层能够捕获和处理
+            raise RuntimeError(error_msg)
     
     return md_header_splits

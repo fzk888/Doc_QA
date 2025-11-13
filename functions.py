@@ -22,26 +22,39 @@ from document_reranker import DocumentReranker
 from bm25_search import BM25Search
 import time
 import random
+from concurrent.futures import ThreadPoolExecutor
 # Load configuration
 with open("config.yaml", "r") as config_file:
     config = yaml.safe_load(config_file)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("docqa")
 
-# Load embeddings and reranker models
 model_kwargs = {"device": config['settings']['device']}
 encode_kwargs = {
     "batch_size": config['settings']['batch_size'],
     "normalize_embeddings": config['settings']['normalize_embeddings']
 }
-embeddings = HuggingFaceBgeEmbeddings(
-    model_name=config['paths']['model_dir'],
-    model_kwargs=model_kwargs,
-    encode_kwargs=encode_kwargs,
-)
-reranker_model = FlagReranker(config['paths']['reranker_model_dir'], use_fp16=config['settings']['use_fp16'])
+_embeddings = None
+_reranker_model = None
+
+def get_embeddings():
+    global _embeddings
+    if _embeddings is None:
+        logger.info("正在初始化嵌入模型（BGE）...")
+        _embeddings = HuggingFaceBgeEmbeddings(
+            model_name=config['paths']['model_dir'],
+            model_kwargs=model_kwargs,
+            encode_kwargs=encode_kwargs,
+        )
+    return _embeddings
+
+def get_reranker_model():
+    global _reranker_model
+    if _reranker_model is None:
+        _reranker_model = FlagReranker(config['paths']['reranker_model_dir'], use_fp16=config['settings']['use_fp16'])
+    return _reranker_model
 
 
 class KBState:
@@ -57,27 +70,46 @@ kb_state = KBState()
     
 def get_top_documents(query: str):
     # global kb_state
-    logger.info(f"Current KB Name: {kb_state.current_kb_name}")  # 添加日志记录
+    logger.info(f"Current KB Name: {kb_state.current_kb_name}")
     if not kb_state.kb_vectordb or not kb_state.searcher_from_target_doc:
         raise ValueError("Knowledge base not loaded.")
 
-    retriever = kb_state.kb_vectordb.as_retriever(search_kwargs={"k": 5})
-    bge_context = retriever.get_relevant_documents(query)
-    bm25_context = kb_state.searcher_from_target_doc.search(query, threshold=0.2)
+    # 适度降低向量检索返回数量，减少后续重排负载
+    logger.info("正在进行向量检索...")
+    retriever = kb_state.kb_vectordb.as_retriever(search_kwargs={"k": 4})
+    # 并行执行向量检索与 BM25 检索以降低总体等待时间
+    with ThreadPoolExecutor(max_workers=2) as ex:
+        fut_bge = ex.submit(retriever.invoke, query)
+        logger.info("正在进行 BM25 检索...")
+        fut_bm25 = ex.submit(kb_state.searcher_from_target_doc.search, query, 0.2)
+        bge_context = fut_bge.result()
+        bm25_context = fut_bm25.result()
+    # BM25 已经按得分排序，限制候选数量避免过多文档进入重排
+    if len(bm25_context) > 8:
+        bm25_context = bm25_context[:8]
+
+    logger.info("正在融合向量检索与 BM25 结果...")
     merged_res = bge_context + bm25_context
 
     if len(merged_res) <= 1:
         return [(merged_res[0], 0.3)] if merged_res else []
 
-    unique_res = list({doc.page_content: doc for doc in merged_res}.values())
-    reranker = DocumentReranker(reranker_model)
-    top_documents_with_scores = reranker.rerank_documents(query, unique_res, top_n=3)
-    unique_top_documents = list({doc.page_content: (doc, round(score, 2)) for doc, score in top_documents_with_scores}.values())
-    rr = []
-    for i in unique_top_documents:
-        if i[0].metadata.get('file_path') != None:
-            rr.append(i)
-    return rr
+    # 基于 file_path 去重，避免对长文本 page_content 做哈希比较
+    unique_by_path = {}
+    for doc in merged_res:
+        file_path = doc.metadata.get('file_path')
+        if file_path and file_path not in unique_by_path:
+            unique_by_path[file_path] = doc
+    unique_docs = list(unique_by_path.values())
+
+    logger.info("正在重排候选文档...")
+    reranker = DocumentReranker(get_reranker_model())
+    # 控制进入重排的最大候选数量
+    candidates = unique_docs[:8]
+    top_documents_with_scores = reranker.rerank_documents(query, candidates, top_n=3)
+
+    # 返回 (Document, score) 且要求存在 file_path 元数据
+    return [(doc, round(score, 2)) for doc, score in top_documents_with_scores if doc.metadata.get('file_path')]
 
 def run_llm_Knowlege_baes_file_QA(query: str, keep_history: bool = True):
     openai_api_key = config['paths']['openai_api_keys']
@@ -92,7 +124,11 @@ def run_llm_Knowlege_baes_file_QA(query: str, keep_history: bool = True):
     )
 
     history_str = "\n".join([str(item) for item in kb_state.history]) + "\n这是以上我和你的对话记录，请参考\n"
-    uploaded_files = {os.path.basename(doc.metadata.get('file_path', '')) for doc in kb_vectordb.docstore._dict.values()}
+    # use global kb_state.kb_vectordb; fall back to empty set if not available
+    if getattr(kb_state, 'kb_vectordb', None) is None:
+        uploaded_files = set()
+    else:
+        uploaded_files = {os.path.basename(doc.metadata.get('file_path', '')) for doc in kb_state.kb_vectordb.docstore._dict.values()}
     prompt_template = "以上是历史信息{history_str}，您是一位由 Dana AI 开发的大型语言人工智能助手。您将被提供一个用户问题,根据知识库文档列表{uploaded_files},结合问题{query}，撰写一个清晰、简洁且准确的答案。回答："
     prompt = PromptTemplate(template=prompt_template, input_variables=["history_str", "uploaded_files", "query"])
     rag_chain = (
@@ -348,8 +384,11 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         streaming=True
     )
     # global kb_state
-    print("Double check")
-    print(kb_state)
+    logger.info("enter run_llm_MulitDocQA")
+    try:
+        logger.info(f"kb_state.current_kb_name={kb_state.current_kb_name} kb_vectordb_is_none={kb_state.kb_vectordb is None}")
+    except Exception:
+        logger.info(f"kb_state: {kb_state}")
     if len(input_query) == 1:
         query = input_query[0].content
         history_str = ""
@@ -360,7 +399,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         query = input_query[-1].content
         history_str = history_list_to_str([query[0:-1]])
 #    history_str = history_list_to_str(history)
-    print(input_query)
+    logger.info(f"input_query: {input_query}")
     
     def generate_prompt(template, input_variables):
         return PromptTemplate(template=template, input_variables=input_variables)
@@ -375,14 +414,14 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         try:
             top_documents[0].metadata["isQA"]
             if document_question_relevance(query, top_documents[0]) == '是':
-                print("问题和问答文档相关")
+                logger.info("问题和问答文档相关")
                 answer = "\n".join(top_documents[0].page_content.split('\n')[1:])
-                print(answer)
+                logger.info(f"answer (truncated 200 chars): {answer[:200]}")
                 if top_documents[0].metadata["file_url"] != '-':
                     str_l = len(answer[:-1])
                     try:
                         for i in range(str_l // 3):
-                            print(answer[:-1][i*3:(i+1)*3])
+                            logger.info(answer[:-1][i*3:(i+1)*3])
                             yield stream_type(answer[:-1][i*3:(i+1)*3])
                             time.sleep(0.2)
                         yield stream_type(answer[:-1][(i+1)*3:(i+1)*3 + str_l%3])
@@ -396,16 +435,16 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
 
                     try:
                         for i in range(str_l // 3):
-                            print(answer[i*3:(i+1)*3])
+                            logger.info(answer[i*3:(i+1)*3])
                             yield stream_type(answer[i*3:(i+1)*3])
                             time.sleep(0.2)
                         yield stream_type(answer[(i+1)*3:(i+1)*3 + str_l%3])
                     except:
                         yield stream_type(answer)
             else:
-                print("问题和问答文档不相关")
+                logger.info("问题和问答文档不相关")
                 if document_question_relevance(query, top_documents) == '是':
-                    print("文档和问题相关")
+                    logger.info("文档和问题相关")
                     template = (prompt_template_from_user or "您是一位由 Dana AI 开发的大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                                 (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                                 "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
@@ -434,7 +473,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
 
         except:
             if document_question_relevance(query, top_documents) == '是':
-                print("文档和问题相关")
+                logger.info("文档和问题相关")
                 template = (prompt_template_from_user or "您是一位由 Dana AI 开发的大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                             (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                             "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
@@ -464,17 +503,17 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         document_question_relevance(query, top_documents[0])
         try:
             top_documents[0].metadata["isQA"]
-            print(document_question_relevance(query, top_documents[0]))
+            logger.info(f"document_question_relevance: {document_question_relevance(query, top_documents[0])}")
             if document_question_relevance(query, top_documents[0]) == '是':
-                print("问题和问答文档相关")
+                logger.info("问题和问答文档相关")
                 answer = "\n".join(top_documents[0].page_content.split('\n')[1:])
-                print(top_documents[0].metadata["file_url"])
-                print("===")
+                logger.info(f"file_url: {top_documents[0].metadata.get('file_url')}")
+                logger.info("===")
                 if top_documents[0].metadata["file_url"] != '-':
                     str_l = len(answer[:-1])
                     try:
                         for i in range(str_l // 3):
-                            print(answer[:-1][i*3:(i+1)*3])
+                            logger.info(answer[:-1][i*3:(i+1)*3])
                             yield stream_type(answer[:-1][i*3:(i+1)*3])
                             time.sleep(0.2)
                         yield stream_type(answer[:-1][(i+1)*3:(i+1)*3 + str_l%3])
@@ -489,7 +528,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
 
                     try:
                         for i in range(str_l // 3):
-                            print(answer[i*3:(i+1)*3])
+                            logger.info(answer[i*3:(i+1)*3])
                             yield stream_type(answer[i*3:(i+1)*3])
                             time.sleep(0.2)
                         yield stream_type(answer[(i+1)*3:(i+1)*3 + str_l%3])
@@ -497,9 +536,9 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                         yield stream_type(answer)
 
             else:
-                print("问题和问答文档不相关")
+                logger.info("问题和问答文档不相关")
                 if document_question_relevance(query, top_documents) == '是':
-                    print("文档和问题相关")
+                    logger.info("文档和问题相关")
                     template = (prompt_template_from_user or "您是一位由 Dana AI 开发的大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                                 (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                                 "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
@@ -549,7 +588,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         ###########################################################################################
         except:
             if document_question_relevance(query, top_documents) == '是':
-                print("文档和问题相关")
+                logger.info("文档和问题相关")
 
                 template = (prompt_template_from_user or "您是一位由 Dana AI 开发的大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                             (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
@@ -616,7 +655,7 @@ def only_llm(input_query: str, only_chatKBQA: bool, prompt_template_from_user: s
         query = input_query[-1].content
         history_str = history_list_to_str([query[0:-1]])
 #    history_str = history_list_to_str(history)
-    print(input_query)
+    logger.info(f"only_llm input_query: {input_query}")
     
     def generate_prompt(template, input_variables):
         return PromptTemplate(template=template, input_variables=input_variables)
@@ -656,7 +695,10 @@ def view_history(history):
     return history_str, total_tokens
 
 def get_uploaded_files():
-    return {os.path.basename(doc.metadata.get('file_path', '')) for doc in kb_vectordb.docstore._dict.values()}
+    # Use kb_state.kb_vectordb (global state) instead of undefined kb_vectordb
+    if getattr(kb_state, 'kb_vectordb', None) is None:
+        return set()
+    return {os.path.basename(doc.metadata.get('file_path', '')) for doc in kb_state.kb_vectordb.docstore._dict.values()}
 
 def stream_type(data, model=config['models']['llm_model']):
     return f"data: {json.dumps({'id': str(uuid.uuid4()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': data}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n".encode('utf-8')

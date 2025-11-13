@@ -7,6 +7,7 @@ from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharact
 from langchain_community.document_loaders import TextLoader
 from langchain.schema import Document
 import pypandoc
+import logging
 from pypdf import PdfReader
 import requests
 
@@ -21,6 +22,19 @@ import json
 from docx import Document as Document2
 
 url_f = "http://0.0.0.0:8001/detection_pic"
+
+# 统一分块日志记录器
+chunk_logger = logging.getLogger("docqa.chunk")
+
+# Ensure pandoc is available for pypandoc on Windows
+def _ensure_pandoc_installed():
+    try:
+        # Will raise OSError if pandoc is not found
+        pypandoc.get_pandoc_version()
+    except OSError:
+        logging.info("Pandoc not found. Will use python-docx as fallback.")
+
+_ensure_pandoc_installed()
 
 def is_valid_table(table_df, min_char_count=120):
     total_char_count = sum(len(str(cell)) for _, row in table_df.iterrows() for cell in row)
@@ -211,7 +225,21 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
             os.makedirs(media_dir, exist_ok=True)
             
             # 将 .docx 文件转换为 Markdown，提取的媒体文件保存在 media_dir 中
-            markdown_text = pypandoc.convert_file(doc_file, 'markdown', extra_args=['--extract-media=' + media_dir])
+            # If pandoc is unavailable or conversion fails, fallback to python-docx
+            try:
+                markdown_text = pypandoc.convert_file(doc_file, 'markdown', extra_args=['--extract-media=' + media_dir])
+            except Exception as e:
+                # 减少警告信息的详细程度
+                logging.info(f"Pandoc not available, using python-docx as fallback.")
+                try:
+                    docu = Document2(doc_file)
+                    markdown_text = ""
+                    for p in docu.paragraphs:
+                        text = p.text.strip()
+                        markdown_text += (text + "\n") if text else "\n"
+                except Exception as e2:
+                    logging.error(f"python-docx fallback also failed for {doc_file}: {e2}.")
+                    markdown_text = ""
             
             c = 1
             pattern_1 = r"/media/(image\d+\.png)"
@@ -228,13 +256,18 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                     base_path = media_dir + "/media/"
                     jpg_file = base_path + matches[0]
                     
-                    with open(jpg_file, "rb") as file:
-                        files = {"file": file}
-                        response = requests.post(url_f, files=files)
-                    outs = response.json()["detection_result"]
-                    all_text += '图片识别内容\n'
-                    all_text += outs
-                    all_text += "\n"
+                    # OCR via external service; make this best-effort
+                    try:
+                        with open(jpg_file, "rb") as file:
+                            files = {"file": file}
+                            response = requests.post(url_f, files=files, timeout=10)
+                        response.raise_for_status()
+                        outs = response.json().get("detection_result", "")
+                        all_text += '图片识别内容\n'
+                        all_text += outs
+                        all_text += "\n"
+                    except Exception as ocr_err:
+                        logging.warning(f"Image OCR failed for {jpg_file}: {ocr_err}. Skipping OCR text.")
                     if "height=" not in i:
                         c = 0
                 elif c != 0:
@@ -271,6 +304,7 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
             document = loader.load()[0]
             
             # 拆分 Markdown 内容
+            chunk_logger.info("正在分块 DOCX 文档...")
             text_splitter = RecursiveCharacterTextSplitter(separators=["#####", "######", "#######", "####", "###", "\n**"], chunk_size=200, chunk_overlap=30)
             md_header_splits = text_splitter.create_documents([all_text])
             
@@ -338,9 +372,8 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                 # 创建新的Document对象
                 md_header_splits = [Document(page_content=chunk, metadata={"file_path": doc_file}) for chunk in processed_splits]
         
-        except RuntimeError as e:
-            print(f"转换文件 {doc_file} 时出错：{str(e)}")
-            print("跳过该文件,继续处理下一个文件。")
+        except Exception as e:
+            logging.error(f"处理 {doc_file} 发生错误: {e}. 跳过该文件。")
     
     return md_header_splits
 
@@ -368,10 +401,19 @@ def process_md_file(md_file,markdown_directory):
             else:
                 md_header_splits.append(Document(page_content="\n".join(lines), metadata={"file_path": md_file,"file_url":'-',"isQA":1}))
         
+        # 分块日志（QA格式的Markdown）
+        try:
+            chunk_logger.info(f"Markdown(QA) 分块: file={os.path.basename(md_file)} chunks={len(md_header_splits)}")
+            if md_header_splits:
+                preview = md_header_splits[0].page_content[:200].replace("\n", " ")
+                chunk_logger.info(f"Markdown(QA) 首块预览: {preview}")
+        except Exception:
+            pass
         return md_header_splits
 
     else:
         # 拆分 Markdown 内容
+        chunk_logger.info("正在分块 Markdown 文档...")
         text_splitter = RecursiveCharacterTextSplitter(separators=["#####","######","#######","####", "###","\n**"], chunk_size=300, chunk_overlap=30)
         md_header_splits = text_splitter.create_documents([document.page_content])
         
@@ -406,12 +448,20 @@ def process_md_file(md_file,markdown_directory):
                 if last_header:
                     split.page_content = f"## {last_header}\n\n{split.page_content}"
                 split.metadata["file_path"] = md_file
-    
+
                 # # 移除文本块中的换行符
                 # paragraphs = split.page_content.split('\n\n')
                 # cleaned_paragraphs = [p.replace('\n', ' ').strip() for p in paragraphs]
                 # split.page_content = '\n\n'.join(cleaned_paragraphs)
 
+        # 分块日志（普通Markdown）
+        try:
+            chunk_logger.info(f"Markdown 分块: file={os.path.basename(md_file)} chunks={len(md_header_splits)}")
+            if md_header_splits:
+                preview = md_header_splits[0].page_content[:200].replace("\n", " ")
+                chunk_logger.info(f"Markdown 首块预览: {preview}")
+        except Exception:
+            pass
     return md_header_splits
 
 
@@ -430,6 +480,7 @@ def process_txt_file(txt_file, markdown_directory):
         raise ValueError(f"The file {base_name} does not contain valid content.")
     
     # 拆分 Markdown 内容
+    chunk_logger.info("正在分块 TXT 文档...")
     text_splitter = RecursiveCharacterTextSplitter(separators=["#####","######","#######","####", "###","\n**","\n\n",""], chunk_size=2000, chunk_overlap=200)
     md_header_splits = text_splitter.create_documents([text])
     
@@ -476,6 +527,14 @@ def process_txt_file(txt_file, markdown_directory):
                 file.write(cleaned_content)
                 file.write("\n\n---\n\n")  # 添加分块分隔标志
     
+    # 分块日志（TXT）
+    try:
+        chunk_logger.info(f"TXT 分块: file={os.path.basename(txt_file)} chunks={len(md_header_splits)}")
+        if md_header_splits:
+            preview = md_header_splits[0].page_content[:200].replace("\n", " ")
+            chunk_logger.info(f"TXT 首块预览: {preview}")
+    except Exception:
+        pass
     return md_header_splits
 
 
@@ -573,6 +632,7 @@ url = "http://0.0.0.0:8503/pix2text"
 def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
     try:
         print(f"开始处理文档: {pdf_path}")
+        chunk_logger.info("正在解析 PDF 并分块...")
         pdf_name = os.path.splitext(os.path.basename(pdf_path))[0]
         out_path_md = os.path.join(md_dir, f"{pdf_name}.md") 
         image_dir_file = os.path.join(image_dir, pdf_name)
@@ -613,14 +673,20 @@ def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
         document = loader.load()[0]
         base_name = os.path.basename(pdf_path)
         if len(document.page_content.replace(" ","").replace("\n","")) == 0:
-            
-            if os.path.exists(pdf_path):
-                os.remove(pdf_path)
-                os.remove(out_path_md)
-                print(f"文件 '{pdf_path}' 已被删除。")
-            else:
-                print(f"文件 '{pdf_path}' 不存在。")
-            raise ValueError(f"The file {base_name} does not contain valid content.")
+            if not use_traditional_parsing:
+                pdf_to_markdown(url, pdf_path, out_path_md, extract_images=False)
+                use_traditional_parsing = True
+                loader = TextLoader(out_path_md)
+                document = loader.load()[0]
+            if len(document.page_content.replace(" ","").replace("\n","")) == 0:
+                if os.path.exists(pdf_path):
+                    os.remove(pdf_path)
+                    if os.path.exists(out_path_md):
+                        os.remove(out_path_md)
+                    print(f"文件 '{pdf_path}' 已被删除。")
+                else:
+                    print(f"文件 '{pdf_path}' 不存在。")
+                raise ValueError(f"The file {base_name} does not contain valid content.")
 
         if use_traditional_parsing:
             # 使用传统解析方法,按照指定的 chunk 大小分割文本
@@ -632,6 +698,7 @@ def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
                 text_splits.append(Document(page_content=chunk, metadata=metadata))
         else:
             # 使用原来的分割方式
+            chunk_logger.info("正在按标题分割 PDF Markdown...")
             md_header_splits = markdown_splitter.split_text(document.page_content)
             
             if len(md_header_splits) > 0:
@@ -660,6 +727,13 @@ def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
             
             text_splits = md_header_splits
         
+        try:
+            chunk_logger.info(f"PDF 分块: file={os.path.basename(pdf_path)} chunks={len(text_splits)}")
+            if text_splits:
+                preview = text_splits[0].page_content[:200].replace("\n", " ")
+                chunk_logger.info(f"PDF 首块预览: {preview}")
+        except Exception:
+            pass
         print(f"文档处理完成: {pdf_path}")
         return text_splits
     
