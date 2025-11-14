@@ -31,6 +31,60 @@ with open("config.yaml", "r") as config_file:
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docqa")
 
+LOG_PROMPT_MAX_CHARS = int(os.getenv("LOG_PROMPT_MAX_CHARS", "1200"))
+def _log_prompt(text):
+    truncated = text if len(text) <= LOG_PROMPT_MAX_CHARS else text[:LOG_PROMPT_MAX_CHARS] + f"...(truncated {len(text) - LOG_PROMPT_MAX_CHARS} chars)"
+    logger.info(f"LLM prompt ({len(text)} chars): {truncated}")
+def _summarize_docs(docs):
+    try:
+        names = [os.path.basename(doc.metadata.get('file_path', '')) for doc in docs]
+    except Exception:
+        names = []
+    n = len(docs) if docs is not None else 0
+    head = names[:3]
+    extra = n - len(head)
+    return f"docs_count={n} sources={head}" + (f" (+{extra} more)" if extra > 0 else "")
+def _truncate_text(text, max_chars):
+    return text if len(text) <= max_chars else text[:max_chars] + f"...(truncated {len(text) - max_chars} chars)"
+def _docs_preview(docs, max_docs=3, preview_chars=300):
+    try:
+        items = []
+        for i, d in enumerate(docs[:max_docs]):
+            name = os.path.basename(d.metadata.get('file_path', ''))
+            preview = _truncate_text(d.page_content, preview_chars)
+            items.append({"source": name, "preview": preview})
+        more = len(docs) - len(items)
+        return str(items) + (f" (+{more} more)" if more > 0 else "")
+    except Exception:
+        return "[]"
+def _render_prompt_safe(prompt, **kwargs):
+    safe = dict(kwargs)
+    if 'top_documents' in safe and safe['top_documents'] is not None:
+        safe['top_documents'] = _docs_preview(safe['top_documents'])
+    if 'document' in safe:
+        doc_val = safe['document']
+        if isinstance(doc_val, list):
+            doc_str = "\n".join([str(x) for x in doc_val])
+        else:
+            doc_str = str(doc_val)
+        safe['document'] = _truncate_text(doc_str, 800)
+    if 'uploaded_files' in safe and safe['uploaded_files'] is not None:
+        try:
+            sample = list(sorted(safe['uploaded_files']))[:5]
+        except Exception:
+            sample = []
+        safe['uploaded_files'] = str(sample)
+    if 'history' in safe and safe['history'] is not None:
+        safe['history'] = _truncate_text(safe['history'], 800)
+    if 'history_str' in safe and safe['history_str'] is not None:
+        safe['history_str'] = _truncate_text(safe['history_str'], 800)
+    if 'query' in safe and safe['query'] is not None:
+        safe['query'] = _truncate_text(str(safe['query']), 500)
+    try:
+        return prompt.format(**safe)
+    except Exception:
+        return str(safe)
+
 model_kwargs = {"device": config['settings']['device']}
 encode_kwargs = {
     "batch_size": config['settings']['batch_size'],
@@ -122,6 +176,8 @@ def run_llm_Knowlege_baes_file_QA(query: str, keep_history: bool = True):
         temperature=0.2,
         streaming=True
     )
+    logger.info(f"LLM base_url={openai_api_base} model={config['models']['llm_model']}")
+    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
 
     history_str = "\n".join([str(item) for item in kb_state.history]) + "\n这是以上我和你的对话记录，请参考\n"
     # use global kb_state.kb_vectordb; fall back to empty set if not available
@@ -129,8 +185,10 @@ def run_llm_Knowlege_baes_file_QA(query: str, keep_history: bool = True):
         uploaded_files = set()
     else:
         uploaded_files = {os.path.basename(doc.metadata.get('file_path', '')) for doc in kb_state.kb_vectordb.docstore._dict.values()}
-    prompt_template = "以上是历史信息{history_str}，您是一位由 Dana AI 开发的大型语言人工智能助手。您将被提供一个用户问题,根据知识库文档列表{uploaded_files},结合问题{query}，撰写一个清晰、简洁且准确的答案。回答："
+    prompt_template = "以上是历史信息{history_str}，您是一位大型语言人工智能助手。您将被提供一个用户问题,根据知识库文档列表{uploaded_files},结合问题{query}，撰写一个清晰、简洁且准确的答案。回答："
     prompt = PromptTemplate(template=prompt_template, input_variables=["history_str", "uploaded_files", "query"])
+    rendered_safe = _render_prompt_safe(prompt, history_str=history_str, uploaded_files=uploaded_files, query=query)
+    _log_prompt(rendered_safe)
     rag_chain = (
         {"history_str": lambda x: history_str, "uploaded_files": lambda x: uploaded_files, "query": RunnablePassthrough()}
         | prompt
@@ -166,6 +224,8 @@ def generate_guiding_questions(num_questions_total=3, num_questions_per_doc=2):
         temperature=0.2,
         streaming=True
     )
+    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
+    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
     # global kb_state
     kb_vectordb = kb_state.kb_vectordb
     doc_groups = {}
@@ -217,6 +277,9 @@ def generate_single_question(llm, doc):
     prompt = f"{random_variation}\n内容: {doc.page_content}\n，引导性问题内容要确保有主体，内容不能太复杂，问题要有引导意义，引导用户提问。只能生成一个问题不能有子问题，一步步思考，直接返回问题，不需要任何开头或解释。例如：深圳北站哪个出口最适合打滴滴？"
     
     result = llm.invoke(prompt).content
+    preview_doc = _truncate_text(doc.page_content, 600)
+    preview_prompt = f"{random_variation}\n内容: {preview_doc}\n，引导性问题内容要确保有主体，内容不能太复杂，问题要有引导意义，引导用户提问。只能生成一个问题不能有子问题，一步步思考，直接返回问题，不需要任何开头或解释。例如：深圳北站哪个出口最适合打滴滴？"
+    _log_prompt(preview_prompt)
     
     return result.strip()
 
@@ -234,10 +297,12 @@ def document_question_relevance(question, documents):
         temperature=0,
         streaming=True
     )
+    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
+    docs_list = documents if isinstance(documents, list) else [documents]
 
 
     try:
-        document = get_document_snippets(documents)
+        document = get_document_snippets(docs_list)
 
         prompt = PromptTemplate(
             template="""作为文档相关性评估专家，你的任务是判断给定文档是否与用户问题相关。请仔细阅读以下信息：
@@ -267,10 +332,12 @@ def document_question_relevance(question, documents):
                                 input_variables=["question", "document"],
                             )
 
+        rendered_safe = _render_prompt_safe(prompt, question=question, document=document)
+        _log_prompt(rendered_safe)
         retrieval_grader = prompt | llm | JsonOutputParser()
         result = retrieval_grader.invoke({"question": question, "document": document})
     except:
-        document = documents[0].page_content.split('\n')
+        first_doc_lines = docs_list[0].page_content.split('\n')
         prompt = PromptTemplate(
             template="""作为文本相关性评估专家，你的任务是判断给定的两段文本意思是否相近。请仔细阅读以下信息：
     
@@ -297,8 +364,10 @@ def document_question_relevance(question, documents):
                                 input_variables=["question", "document"],
                             )
 
+        rendered_safe = _render_prompt_safe(prompt, question=question, document=first_doc_lines)
+        _log_prompt(rendered_safe)
         retrieval_grader = prompt | llm | JsonOutputParser()
-        result = retrieval_grader.invoke({"question": question, "document": document})
+        result = retrieval_grader.invoke({"question": question, "document": first_doc_lines})
     
     return result['score']
 
@@ -312,6 +381,7 @@ def is_math_question(question):
         temperature=0.2,
         streaming=True
     )
+    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
     prompt = PromptTemplate(
         template="""你是一个问题分类员，评估一个问题是否需要通过计算过程才能回答是否有一系列事实依据。
                     以下是问题:
@@ -322,6 +392,8 @@ def is_math_question(question):
                     以JSON形式提供，只有一个关键字‘score’，没有序言或解释。""",
         input_variables=["question"],
     )
+    rendered_safe = _render_prompt_safe(prompt, question=question)
+    _log_prompt(rendered_safe)
     hallucination_grader = prompt | llm | JsonOutputParser()
     response = hallucination_grader.invoke({"question": question})
     return response["score"]
@@ -337,6 +409,8 @@ def question_generation_from_last_dialogual(last_dialog: str):
         temperature=0.2,
         streaming=False
     )
+    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
+    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
 
     prompt = PromptTemplate(
         template="""你是一名问题引导专家，请根据上一轮的对话，提出3个引导性问题。每个问题之间用换行符分隔。
@@ -364,6 +438,8 @@ def question_generation_from_last_dialogual(last_dialog: str):
                     请直接生成问题，不需要任何开头或解释。请根据上述要求生成引导性问题：""",
         input_variables=["last_dialog"]
     )
+    rendered_safe = _render_prompt_safe(prompt, last_dialog=last_dialog)
+    _log_prompt(rendered_safe)
     rag_chain = (
         {"last_dialog": RunnablePassthrough()}
         | prompt
@@ -383,6 +459,8 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         temperature=temperature,
         streaming=True
     )
+    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
+    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
     # global kb_state
     logger.info("enter run_llm_MulitDocQA")
     try:
@@ -445,7 +523,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                 logger.info("问题和问答文档不相关")
                 if document_question_relevance(query, top_documents) == '是':
                     logger.info("文档和问题相关")
-                    template = (prompt_template_from_user or "您是一位由 Dana AI 开发的大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
+                    template = (prompt_template_from_user or "您是一位大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                                 (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                                 "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
                     
@@ -460,6 +538,9 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                     if multiple_dialogue:
                         inputs["history"] = history_str
                     
+                    format_inputs = {k: inputs[k] for k in prompt.input_variables if k in inputs}
+                    rendered_safe = _render_prompt_safe(prompt, **format_inputs)
+                    _log_prompt(rendered_safe)
                     response_text = ""
                     for chunk in chain.stream(inputs):
                         response_text += chunk
@@ -474,7 +555,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         except:
             if document_question_relevance(query, top_documents) == '是':
                 logger.info("文档和问题相关")
-                template = (prompt_template_from_user or "您是一位由 Dana AI 开发的大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
+                template = (prompt_template_from_user or "您是一位大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                             (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                             "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
                 
@@ -489,6 +570,9 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                 if multiple_dialogue:
                     inputs["history"] = history_str
                 
+                format_inputs = {k: inputs[k] for k in prompt.input_variables if k in inputs}
+                rendered_safe = _render_prompt_safe(prompt, **format_inputs)
+                _log_prompt(rendered_safe)
                 response_text = ""
                 for chunk in chain.stream(inputs):
                     response_text += chunk
@@ -539,7 +623,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                 logger.info("问题和问答文档不相关")
                 if document_question_relevance(query, top_documents) == '是':
                     logger.info("文档和问题相关")
-                    template = (prompt_template_from_user or "您是一位由 Dana AI 开发的大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
+                    template = (prompt_template_from_user or "您是一位大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                                 (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                                 "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
                     
@@ -554,6 +638,9 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                     if multiple_dialogue:
                         inputs["history"] = history_str
                     
+                    format_inputs = {k: inputs[k] for k in prompt.input_variables if k in inputs}
+                    rendered_safe = _render_prompt_safe(prompt, **format_inputs)
+                    _log_prompt(rendered_safe)
                     response_text = ""
                     for chunk in chain.stream(inputs):
                         response_text += chunk
@@ -565,7 +652,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                         prompt_template_from_user + "根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
                     else:
                         template = ("以上是历史信息{history_str}，" if multiple_dialogue else "") + \
-                            "您是一位由 Dana AI 开发的大型语言人工智能助手。热情有礼貌的和用户进行交互，根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
+                            "您是一位大型语言人工智能助手。热情有礼貌的和用户进行交互，根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
                 
                     input_variables = ["query"]
                     if multiple_dialogue:
@@ -590,7 +677,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
             if document_question_relevance(query, top_documents) == '是':
                 logger.info("文档和问题相关")
 
-                template = (prompt_template_from_user or "您是一位由 Dana AI 开发的大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
+                template = (prompt_template_from_user or "您是一位大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                             (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                             "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
                 
@@ -605,6 +692,9 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                 if multiple_dialogue:
                     inputs["history"] = history_str
                 
+                format_inputs = {k: inputs[k] for k in prompt.input_variables if k in inputs}
+                rendered_safe = _render_prompt_safe(prompt, **format_inputs)
+                _log_prompt(rendered_safe)
                 response_text = ""
                 for chunk in chain.stream(inputs):
                     response_text += chunk
@@ -618,7 +708,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                     prompt_template_from_user + "根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
                 else:
                     template = ("以上是历史信息{history_str}，" if multiple_dialogue else "") + \
-                        "您是一位由 Dana AI 开发的大型语言人工智能助手。热情有礼貌的和用户进行交互，根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
+                        "您是一位大型语言人工智能助手。热情有礼貌的和用户进行交互，根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
                                 
                 input_variables = ["query"]
                 if multiple_dialogue:
@@ -645,6 +735,8 @@ def only_llm(input_query: str, only_chatKBQA: bool, prompt_template_from_user: s
         temperature=temperature,
         streaming=True
     )
+    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
+    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
     if len(input_query) == 1:
         query = input_query[0].content
         history_str = ""
@@ -663,9 +755,9 @@ def only_llm(input_query: str, only_chatKBQA: bool, prompt_template_from_user: s
     def create_chain(prompt):
         return prompt | llm | StrOutputParser()
     
-    template = (prompt_template_from_user or "您是一位由 Dana AI 开发的大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
+    template = (prompt_template_from_user or "你是一位友好、专业的中文对话助手。请用清晰、自然的中文直接回答用户问题；在没有提供文档时进行自由对话与创作；如需讲故事或科普，请自行组织内容；保持简洁准确，不要声明无法回答。") + \
                     (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
-                    "下面是用户问题：{query} 回答："
+                    "\n下面是用户问题：{query} 回答："
                 
     input_variables = ["query"]
     if multiple_dialogue:
@@ -678,6 +770,9 @@ def only_llm(input_query: str, only_chatKBQA: bool, prompt_template_from_user: s
     if multiple_dialogue:
         inputs["history"] = history_str
     
+    format_inputs = {k: inputs[k] for k in prompt.input_variables if k in inputs}
+    rendered_safe = _render_prompt_safe(prompt, **format_inputs)
+    _log_prompt(rendered_safe)
     response_text = ""
     for chunk in chain.stream(inputs):
         response_text += chunk

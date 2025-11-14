@@ -10,6 +10,7 @@ import pypandoc
 import logging
 from pypdf import PdfReader
 import requests
+import yaml
 
 from pdf2image import convert_from_path
 import requests
@@ -21,10 +22,17 @@ import json
 
 from docx import Document as Document2
 
-url_f = "http://0.0.0.0:8001/detection_pic"
+url_f = None
 
 # 统一分块日志记录器
 chunk_logger = logging.getLogger("docqa.chunk")
+with open("config.yaml", "r") as _cf:
+    _cfg = yaml.safe_load(_cf)
+ENABLE_OCR_IMAGES = bool(_cfg.get("settings", {}).get("enable_ocr_images", False))
+ENABLE_PDF_PIX2TEXT = bool(_cfg.get("settings", {}).get("enable_pdf_pix2text", False))
+URL_OCR = _cfg.get("paths", {}).get("ocr_service_url", "http://127.0.0.1:8001/detection_pic")
+URL_PIX2TEXT = _cfg.get("paths", {}).get("pix2text_url", "http://127.0.0.1:8503/pix2text")
+url_f = URL_OCR
 
 # Ensure pandoc is available for pypandoc on Windows
 def _ensure_pandoc_installed():
@@ -257,17 +265,20 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                     jpg_file = base_path + matches[0]
                     
                     # OCR via external service; make this best-effort
-                    try:
-                        with open(jpg_file, "rb") as file:
-                            files = {"file": file}
-                            response = requests.post(url_f, files=files, timeout=10)
-                        response.raise_for_status()
-                        outs = response.json().get("detection_result", "")
-                        all_text += '图片识别内容\n'
-                        all_text += outs
-                        all_text += "\n"
-                    except Exception as ocr_err:
-                        logging.warning(f"Image OCR failed for {jpg_file}: {ocr_err}. Skipping OCR text.")
+                    if ENABLE_OCR_IMAGES:
+                        try:
+                            logging.info(f"[OCR] request {url_f} file={jpg_file}")
+                            with open(jpg_file, "rb") as file:
+                                files = {"file": file}
+                                response = requests.post(url_f, files=files, timeout=10)
+                            response.raise_for_status()
+                            outs = response.json().get("detection_result", "")
+                            all_text += '图片识别内容\n'
+                            all_text += outs
+                            all_text += "\n"
+                            logging.info(f"[OCR] success file={jpg_file} len={len(outs)}")
+                        except Exception as ocr_err:
+                            pass
                     if "height=" not in i:
                         c = 0
                 elif c != 0:
@@ -590,9 +601,11 @@ def pdf_to_markdown(url, pdf_file_path, markdown_file_path, extract_images=False
             image_byte_array = image_byte_array.getvalue()
             
             files = {'image': ('filename.jpg', image_byte_array, 'image/jpeg')}
+            logging.info(f"[pix2text] request {url}")
             r = requests.post(url, data=data, files=files)
             
             all_text += r.json()['results']
+            logging.info("[pix2text] success")
         
         with open(markdown_file_path, 'w', encoding='utf-8') as markdown_file:
             markdown_file.write(all_text)
@@ -626,7 +639,7 @@ def json_to_markdown(data, level=1):
         md_content += f"{data}\n\n"
     return md_content
 
-url = "http://0.0.0.0:8503/pix2text"
+url = URL_PIX2TEXT
 
 
 def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
@@ -644,21 +657,20 @@ def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
             use_traditional_parsing = False
         except Exception as e:
             print(f"使用 extract_all_table_and_textand_image 解析文档出错: {e}")
-            print("切换到传统的 OCR 解析方法")
             use_traditional_parsing = True
-            
-            # # 使用 pypdf 库解析 PDF 文档
-            # with open(pdf_path, 'rb') as file:
-            #     pdf_reader = PdfReader(file)
-            #     text = ""
-            #     for page in pdf_reader.pages:
-            #         text += page.extract_text()
-            
-            # # 将解析后的文本保存到 Markdown 文件中
-            # with open(out_path_md, 'w', encoding='utf-8') as file:
-            #     file.write(text)
-            #使用maker_api解析文档：
-            pdf_to_markdown(url, pdf_path, out_path_md, extract_images=False)
+            if ENABLE_PDF_PIX2TEXT:
+                pdf_to_markdown(url, pdf_path, out_path_md, extract_images=False)
+            else:
+                with open(pdf_path, 'rb') as file:
+                    pdf_reader = PdfReader(file)
+                    text = ""
+                    for page in pdf_reader.pages:
+                        try:
+                            text += page.extract_text() or ""
+                        except Exception:
+                            pass
+                with open(out_path_md, 'w', encoding='utf-8') as file:
+                    file.write(text)
             
 
         # 检查生成的 Markdown 文件是否为空
@@ -674,7 +686,19 @@ def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
         base_name = os.path.basename(pdf_path)
         if len(document.page_content.replace(" ","").replace("\n","")) == 0:
             if not use_traditional_parsing:
-                pdf_to_markdown(url, pdf_path, out_path_md, extract_images=False)
+                if ENABLE_PDF_PIX2TEXT:
+                    pdf_to_markdown(url, pdf_path, out_path_md, extract_images=False)
+                else:
+                    with open(pdf_path, 'rb') as file:
+                        pdf_reader = PdfReader(file)
+                        text = ""
+                        for page in pdf_reader.pages:
+                            try:
+                                text += page.extract_text() or ""
+                            except Exception:
+                                pass
+                    with open(out_path_md, 'w', encoding='utf-8') as file:
+                        file.write(text)
                 use_traditional_parsing = True
                 loader = TextLoader(out_path_md)
                 document = loader.load()[0]

@@ -229,6 +229,71 @@ file_name: file_to_remove.pdf
 ## 许可证
 
 [MIT License](LICENSE)
+## 不相干/无用文件清单（审计）
+
+- 重复拷贝（与根目录实现重复，未被引用）：
+  - `dana-knowledge/bm25_search.py`（重复 `bm25_search.py`）
+  - `dana-knowledge/document_reranker.py`（重复 `document_reranker.py`）
+  - `dana-knowledge/documen_processing.py`（重复 `documen_processing.py`）
+  - `dana-knowledge/stopwords.txt`（重复 `stopwords.txt`）
+  - `dana-knowledge/Knowledge_base.py`（旧实现，未被当前服务引用）
+- 未使用模块/脚本（代码中无导入引用）：
+  - `Knowledge_base.py`（根目录旧版，现用 `Knowledge_based_async.py`）
+  - `embedding_api.py`
+  - `file_processing_utils.py`
+  - `async_functions.py`
+  - `presentation.py`（根目录；当前使用的是 `add/morefile/presentation.py`）
+  - `Qianwen_api2_test.py`
+  - `add/morefile/try.ipynb`
+  - `test_embedding_model_async.ipynb`
+  - `add/morefile/requirement.txt`（与根目录 `req.txt` 重复）
+  - 文档/临时产物：`output.md`、`r.md`、`ubuntu.txt`
+- 示例与可选组件：
+  - `Knowledge_based/广城理学生手册/`（示例知识库数据，可保留用于演示）
+  - `server/index.html`（可选静态前端页面，未由后端路由直接提供，可手动打开）
+  - `add/ocr/ocr_app.py`（可选 OCR 服务；`documen_processing.py:24` 使用的 `url_f` 指向外部服务，若不启用 OCR 则不必运行）
+
+## 当前有效入口与核心接口
+
+- 入口服务：`app.py`
+- 主要接口位置（代码参考）：
+  - 列举知识库：`app.py:123` `/list_kb`
+  - 更新向量库（上传文件）：`app.py:156` `/update_vectordb`
+  - 生成引导性问题：`app.py:345` `/view_guiding_questions`
+  - 多文档问答（SSE/非SSE）：`app.py:435` `/mulitdoc_qa`
+  - 删除知识库文件：`app.py:413` `/remove_file`
+  - 汇总最终响应：`app.py:590` `/final_response`
+
+## 项目结构快照（当前实际）
+
+```
+Doc_QA/
+├── app.py
+├── Knowledge_based_async.py
+├── functions.py
+├── bm25_search.py
+├── document_reranker.py
+├── documen_processing.py
+├── config.yaml
+├── stopwords.txt
+├── server/
+│   └── index.html
+├── Knowledge_based/               # 示例知识库（含 faiss_index、markdown_directory、uploads）
+├── add/
+│   ├── morefile/
+│   │   ├── ppt_processing.py
+│   │   ├── html_processing.py
+│   │   ├── excel_processing.py
+│   │   ├── pic_processing.py
+│   │   ├── doc_processing.py
+│   │   ├── presentation.py
+│   │   ├── rag/
+│   │   └── deepdoc/
+│   └── ocr/ocr_app.py
+└── req.txt
+```
+
+说明：上方仅展示与当前服务相关的核心文件与目录，其余被标记为“未使用/重复”的文件建议后续清理或归档。
 =======
 # 文档问答系统（Doc_QA）
 

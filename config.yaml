@@ -5,17 +5,27 @@ paths:
   reranker_model_dir: "./model/bge-reranker-large/quietnight/bge-reranker-large"
   openai_api_base: "http://chatapi.littlewheat.com/v1"
   openai_api_keys: "sk-OnYyiZA2LdcBaCpthONeRvThnfyyARev5C9xWMSk9G1hvfI0" # 请根据实际情况修改此API密钥
+  # openai_api_base: "http://localhost:11434/v1"
+  # openai_api_keys: "ollama"
+  ocr_service_url: "http://127.0.0.1:8001/detection_pic"
+  pix2text_url: "http://127.0.0.1:8503/pix2text"
 
 models:
   embeddings_model: "bge-large-zh-v1.5"
   reranker_model: "bge-reranker-large"
   llm_model: "deepseek-chat"
+  # llm_model: "qwen2:1.5b"
 
 settings:
   batch_size: 1024
   device: "cpu"
   normalize_embeddings: true
   use_fp16: true
+  only_chatKBQA_default: true # 若为True，则仅依赖知识库回答；若为False，则优先依赖知识库，不相关时走通用聊天
+  temperature_default: 0.7
+  enable_ocr_images: true
+  enable_pdf_pix2text: true
+  pic_ocr_provider: "paddle"
 
 system:
   max_workers: 4

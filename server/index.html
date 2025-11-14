@@ -499,6 +499,10 @@
                         <textarea id="questionInput" placeholder="输入问题...（Enter 发送）"></textarea>
                     </div>
                     <button class="btn-send" id="sendBtn">发送</button>
+                    <label style="margin-left:8px; display:flex; align-items:center; gap:6px;">
+                        <input type="checkbox" id="freeChatToggle">
+                        自由聊天模式
+                    </label>
                 </div>
             </div>
         </main>
@@ -526,7 +530,8 @@
             sendBtn: document.getElementById('sendBtn'),
             currentKbBadge: document.getElementById('currentKbBadge'),
             currentKbName: document.getElementById('currentKbName'),
-            notification: document.getElementById('notification')
+            notification: document.getElementById('notification'),
+            freeChatToggle: document.getElementById('freeChatToggle')
         };
         let currentKB = null;
         let selectedFiles = [];
@@ -692,28 +697,33 @@
         async function sendQuestion() {
             const q = elements.questionInput.value.trim();
             if (!q) { showNotification('请输入问题', 'error'); return; }
-            if (!currentKB) { showNotification('请先选择知识库', 'error'); return; }
+            if (!currentKB && !(elements.freeChatToggle && elements.freeChatToggle.checked)) { showNotification('请先选择知识库', 'error'); return; }
             addMessage('user', q);
             elements.questionInput.value = '';
             const id = addMessage('assistant', '<div class="loading-dots"><span class="loading-dot"></span><span class="loading-dot"></span><span class="loading-dot"></span></div>');
             let answered = false;
             try {
+                const payload = {
+                    model: 'deepseek-chat',
+                    messages: [{ role: 'user', content: q }],
+                    temperature: 0.5,
+                    stream: true,
+                    show_source: true,
+                    derivation: false
+                };
+                if (currentKB) {
+                    payload.kb_name = currentKB;
+                }
+                if (elements.freeChatToggle && elements.freeChatToggle.checked) {
+                    payload.only_chatKBQA = false;
+                }
                 const res = await fetch(API_BASE + '/mulitdoc_qa', {
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
                         'Accept': 'text/event-stream'
                     },
-                    body: JSON.stringify({
-                        model: 'deepseek-chat',
-                        messages: [{ role: 'user', content: q }],
-                        temperature: 0.5,
-                        stream: true,
-                        only_chatKBQA: true,
-                        kb_name: currentKB,
-                        show_source: true,
-                        derivation: false
-                    })
+                    body: JSON.stringify(payload)
                 });
 
                 const msg = document.getElementById('msg-' + id);

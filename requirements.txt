@@ -1,0 +1,39 @@
+# vllm在Windows上不兼容，请在Linux环境下使用时取消注释
+# vllm==0.5.1
+# datrie在Windows上需要Microsoft Visual C++ 14.0，已注释
+pdfplumber
+langchain
+langchain_community
+pypandoc
+pypdf
+rank_bm25
+jieba
+FlagEmbedding
+aiofiles
+langchain_openai
+faiss-cpu
+tabulate
+pdf2image
+# datrie
+hanziconv
+nltk
+pycryptodomex
+cachetools
+ruamel.yaml
+strenum
+roman_numbers
+word2number
+cn2an
+xgboost
+PyPDF2
+opencv-python
+onnxruntime
+shapely
+pyclipper
+python-docx
+openpyxl
+python-pptx
+readability
+html_text
+chardet
+python-multipart
