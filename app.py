@@ -11,6 +11,7 @@ import os
 import shutil
 import yaml
 import logging
+import uuid
 import time
 from logging.handlers import RotatingFileHandler
 import aiofiles
@@ -33,6 +34,7 @@ LOG_FILE = os.path.join(LOG_DIR, "server.log")
 
 logger = logging.getLogger("docqa")
 logger.setLevel(logging.INFO)
+logger.propagate = False
 
 # Avoid duplicate handlers when reloading in dev
 if not any(isinstance(h, RotatingFileHandler) for h in logger.handlers):
@@ -47,6 +49,10 @@ if not any(h for h in logger.handlers if getattr(h, "_is_console", False)):
     console_handler.setLevel(logging.INFO)
     console_handler.setFormatter(logging.Formatter("%(asctime)s [%(levelname)s] %(name)s - %(message)s"))
     logger.addHandler(console_handler)
+
+# Reduce noisy third-party logs
+logging.getLogger("transformers").setLevel(logging.ERROR)
+logging.getLogger("httpx").setLevel(logging.WARNING)
 
 # Load configuration
 with open("config.yaml", "r") as config_file:
@@ -70,14 +76,16 @@ async def log_requests(request: Request, call_next):
     start = time.time()
     method = request.method
     path = request.url.path
+    req_id = request.headers.get("X-Request-ID") or uuid.uuid4().hex[:8]
+    request.state.req_id = req_id
     try:
         response = await call_next(request)
         duration_ms = (time.time() - start) * 1000
-        logger.info(f"{method} {path} -> {response.status_code} in {duration_ms:.1f}ms")
+        logger.info(f"[req:{req_id}] {method} {path} -> {response.status_code} in {duration_ms:.1f}ms")
         return response
     except Exception as e:
         duration_ms = (time.time() - start) * 1000
-        logger.exception(f"{method} {path} failed after {duration_ms:.1f}ms: {e}")
+        logger.exception(f"[req:{req_id}] {method} {path} failed after {duration_ms:.1f}ms: {e}")
         raise
 
 # Global variables
@@ -142,7 +150,7 @@ async def delete_kb(kb_name: str = Form(...)):
     if os.path.exists(kb_dir):
         try:
             shutil.rmtree(kb_dir)
-            logger.info(f"Knowledge base '{kb_name}' deleted successfully")
+            logger.info(f"✓ KB deleted: {kb_name}")
             return JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' deleted successfully"})
         except Exception as e:
             error_message = str(e)
@@ -224,7 +232,7 @@ async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] 
         # 如需节省空间，可改为移动到 doc_directory 后清空。
         logger.info(f"Knowledge base '{kb_name}' vector DB updated; uploads retained for verification.")
 
-        logger.info(f"Knowledge base '{kb_name}' updated successfully")
+        logger.info(f"✓ KB updated: {kb_name}")
         
         return JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' updated successfully and select", "result": result})
 
@@ -261,7 +269,7 @@ async def update_global_state(kb_name, kb, state):
         state.searcher_from_target_doc = None
     state.current_kb_name = kb_name
     print("重新选择向量库完成")
-    logger.info(f"Knowledge base '{kb_name}' selected successfully")
+    logger.debug(f"KB selected: {kb_name}")
     
 # @app.post("/update_vectordb")
 # async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] = File(...), state=kb_state):
@@ -323,7 +331,7 @@ async def update_global_state(kb_name, kb, state):
 #         shutil.rmtree(upload_directory)
 #         os.makedirs(upload_directory)
 
-#         logger.info(f"Knowledge base '{kb_name}' updated successfully")
+#         logger.info(f"✓ KB updated: {kb_name}")
         
 #         # global kb_state
 #         kb_state.kb = KnowledgeBase(kb_name, embeddings)
@@ -333,7 +341,7 @@ async def update_global_state(kb_name, kb, state):
 #         kb_state.searcher_from_target_doc = BM25Search(kb_state.unfilter_context)
 #         kb_state.current_kb_name = kb_name  # 更新当前知识库名称
 #         print("重新选择向量库完成")
-#         logger.info(f"Knowledge base '{kb_name}' selected successfully")
+#         logger.debug(f"KB selected: {kb_name}")
 
         
 #         return JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' updated successfully and select", "result": result})
@@ -356,7 +364,7 @@ async def view_guiding_questions_api(request: Request):
         # global kb_state  # 确保使用全局的kb_state实例
         # 检查是否需要重新加载知识库
         if kb_state.current_kb_name == kb_name:
-            logger.info(f"Knowledge base '{kb_name}' is already loaded")
+            logger.debug(f"KB {kb_name} cached")
         else:
             kb_dir = os.path.join(KB_DIR, kb_name)
             if os.path.exists(kb_dir):
@@ -372,7 +380,7 @@ async def view_guiding_questions_api(request: Request):
                         kb_state.unfilter_context = []
                         kb_state.searcher_from_target_doc = None
                     kb_state.current_kb_name = kb_name  # 更新当前知识库名称
-                    logger.info(f"Knowledge base '{kb_name}' selected successfully")
+                    logger.debug(f"KB selected: {kb_name}")
                     #yield JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' selected successfully"})
                 except Exception as e:
                     error_message = str(e)
@@ -387,7 +395,7 @@ async def view_guiding_questions_api(request: Request):
                     kb_state.unfilter_context = []
                     kb_state.searcher_from_target_doc = None
                     kb_state.current_kb_name = kb_name  # 更新当前知识库名称
-                    logger.info(f"Knowledge base '{kb_name}' created successfully")
+                    logger.info(f"✓ KB created: {kb_name}")
                     #return JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' created successfully"})
                 except Exception as e:
                     error_message = str(e)
@@ -441,8 +449,8 @@ async def run_llm_mulitdoc_qa_api(request: Request):
         prompt_request = PromptRequest(**request_data)
         #add 数据库名字
         kb_name = prompt_request.kb_name
-        print("接收到的名字")
-        print(kb_name)
+        _req = getattr(request.state, "req_id", None) or uuid.uuid4().hex[:8]
+        logger.info(f"[req:{_req}] /mulitdoc_qa received kb={kb_name}")
         messages = prompt_request.messages
         temperature = prompt_request.temperature
         # 正确处理消息内容：仅当存在 system 角色消息时才作为提示词模板
@@ -465,6 +473,7 @@ async def run_llm_mulitdoc_qa_api(request: Request):
             only_chatKBQA = config['settings'].get('only_chatKBQA_default', True)
         if 'temperature' not in request_data:
             temperature = config['settings'].get('temperature_default', 0.5)
+        logger.info(f"[req:{_req}] flags only_chatKBQA={only_chatKBQA} multiple_dialogue={multiple_dialogue} derivation={derivation} show_source={show_source} stream={getattr(prompt_request,'stream',True)}")
 
         if kb_name != None:
             #add 数据库加载
@@ -473,8 +482,7 @@ async def run_llm_mulitdoc_qa_api(request: Request):
             # global kb_state  # 确保使用全局的kb_state实例
             # 检查是否需要重新加载知识库
             if kb_state.current_kb_name == kb_name:
-                print("不需要重新加载")
-                logger.info(f"Knowledge base '{kb_name}' is already loaded")
+                logger.debug(f"[req:{_req}] KB {kb_name} cached")
     
             else:
                 kb_dir = os.path.join(KB_DIR, kb_name)
@@ -494,8 +502,7 @@ async def run_llm_mulitdoc_qa_api(request: Request):
                             kb_state.searcher_from_target_doc = None
                             logger.warning(f"Vector DB not available for knowledge base '{kb_name}'. Proceeding without KB context.")
                         
-                        print("重新加载成功1")
-                        logger.info(f"Knowledge base '{kb_name}' selected successfully")
+                        logger.debug(f"[req:{_req}] KB selected: {kb_name}")
                         #yield JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' selected successfully"})
                     except Exception as e:
                         error_message = str(e)
@@ -512,8 +519,7 @@ async def run_llm_mulitdoc_qa_api(request: Request):
                         kb_state.unfilter_context = []
                         kb_state.searcher_from_target_doc = None
                         
-                        print("重新加载成功2")
-                        logger.info(f"Knowledge base '{kb_name}' created successfully")
+                        logger.info(f"[req:{_req}] ✓ KB created: {kb_name}")
                         #return JSONResponse(status_code=200, content={"code": 200, "message": f"Knowledge base '{kb_name}' created successfully"})
                     except Exception as e:
                         error_message = str(e)
@@ -522,12 +528,14 @@ async def run_llm_mulitdoc_qa_api(request: Request):
             
             # 当向量库不可用时，回退为仅LLM对话，避免 500
             if kb_state.kb_vectordb is None:
-                logger.warning(f"KB '{kb_name}' has no vector DB; answering without KB context.")
-                result_generator = only_llm(query, only_chatKBQA, prompt_template_from_user, temperature, multiple_dialogue, derivation, show_source)
+                logger.warning(f"[req:{_req}] KB '{kb_name}' has no vector DB; answering without KB context.")
+                result_generator = only_llm(query, prompt_template_from_user, temperature, multiple_dialogue)
             else:
-                result_generator = run_llm_MulitDocQA(query, only_chatKBQA, prompt_template_from_user, temperature, multiple_dialogue, derivation, show_source)
+                logger.info(f"[req:{_req}] using KB '{kb_name}' for QA")
+                result_generator = run_llm_MulitDocQA(query, only_chatKBQA, prompt_template_from_user, temperature, multiple_dialogue, derivation, show_source, req_id=_req)
         else:
-            result_generator = only_llm(query, only_chatKBQA, prompt_template_from_user, temperature, multiple_dialogue, derivation, show_source)
+            logger.info(f"[req:{_req}] no kb specified; using only LLM")
+            result_generator = only_llm(query, prompt_template_from_user, temperature, multiple_dialogue)
 
         # 如果客户端支持流式（SSE），按流式返回；否则聚合为一次性 JSON 返回
         stream = getattr(prompt_request, "stream", True)
@@ -542,7 +550,7 @@ async def run_llm_mulitdoc_qa_api(request: Request):
                     await asyncio.sleep(0)
                 yield "data: [DONE]\n\n"
 
-            logger.info("Request processed successfully")
+            logger.info(f"[req:{_req}] Request processed successfully")
             # 添加禁用缓冲的响应头，确保反向代理和浏览器即时刷新 SSE 内容
             return StreamingResponse(
                 output_generator(),
@@ -574,7 +582,7 @@ async def run_llm_mulitdoc_qa_api(request: Request):
                     # 跳过异常的 SSE 片段
                     continue
 
-            logger.info("Request processed successfully (non-stream)")
+            logger.info(f"[req:{_req}] Request processed successfully (non-stream)")
             return JSONResponse(status_code=200, content={
                 "code": 200,
                 "message": "success",

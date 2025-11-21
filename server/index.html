@@ -535,6 +535,7 @@
         };
         let currentKB = null;
         let selectedFiles = [];
+        let conversationHistory = []; // 存储对话历史
         function showNotification(msg, type = 'info') {
             elements.notification.textContent = msg;
             elements.notification.className = 'notification ' + type;
@@ -700,16 +701,18 @@
             if (!currentKB && !(elements.freeChatToggle && elements.freeChatToggle.checked)) { showNotification('请先选择知识库', 'error'); return; }
             addMessage('user', q);
             elements.questionInput.value = '';
-            const id = addMessage('assistant', '<div class="loading-dots"><span class="loading-dot"></span><span class="loading-dot"></span><span class="loading-dot"></span></div>');
+            const id = addMessage('assistant', '<div class="loading-dots"><span class="loading-dot"></span><span class="loading-dot"></span><span class="loading-dot"></span></div>', true);
             let answered = false;
             try {
+                // 使用已追踪的对话历史
                 const payload = {
                     model: 'deepseek-chat',
-                    messages: [{ role: 'user', content: q }],
+                    messages: conversationHistory,
                     temperature: 0.5,
                     stream: true,
                     show_source: true,
-                    derivation: false
+                    derivation: false,
+                    multiple_dialogue: conversationHistory.length > 1
                 };
                 if (currentKB) {
                     payload.kb_name = currentKB;
@@ -782,6 +785,9 @@
                 if (msg && contentEl && !aggregatedText) {
                     msg.remove();
                     addMessage('assistant', '暂无回答');
+                } else if (aggregatedText) {
+                    // 将完整的AI回复添加到对话历史
+                    conversationHistory.push({ role: 'assistant', content: aggregatedText });
                 }
                 answered = true;
             } catch (e) {
@@ -798,7 +804,7 @@
         elements.questionInput.addEventListener('keydown', e => {
             if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendQuestion(); }
         });
-        function addMessage(role, content) {
+        function addMessage(role, content, isPlaceholder = false) {
             const id = Date.now() + Math.floor(Math.random() * 1000);
             const div = document.createElement('div');
             div.className = 'message ' + role;
@@ -852,6 +858,11 @@
                         }
                     });
                 }
+            }
+            
+            // 更新对话历史记录（只记录实际内容，跳过占位符）
+            if (!isPlaceholder) {
+                conversationHistory.push({ role: role, content: content });
             }
             
             // 滚动到底部

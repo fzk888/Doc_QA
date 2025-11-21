@@ -28,13 +28,19 @@ with open("config.yaml", "r") as config_file:
     config = yaml.safe_load(config_file)
 
 # Configure logging
-logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("docqa")
+logger.setLevel(logging.INFO)
+logger.propagate = False
 
-LOG_PROMPT_MAX_CHARS = int(os.getenv("LOG_PROMPT_MAX_CHARS", "1200"))
+LOG_PROMPT_MAX_CHARS = int(os.getenv("LOG_PROMPT_MAX_CHARS", "300"))
 def _log_prompt(text):
-    truncated = text if len(text) <= LOG_PROMPT_MAX_CHARS else text[:LOG_PROMPT_MAX_CHARS] + f"...(truncated {len(text) - LOG_PROMPT_MAX_CHARS} chars)"
-    logger.info(f"LLM prompt ({len(text)} chars): {truncated}")
+    if len(text) <= LOG_PROMPT_MAX_CHARS:
+        logger.info(f"Prompt: {text}")
+    else:
+        logger.info(f"Prompt length: {len(text)} chars (truncated)")
+        logger.info(f"Prompt start: {text[:LOG_PROMPT_MAX_CHARS]}...")
+        logger.info(f"Prompt end: ...{text[-LOG_PROMPT_MAX_CHARS:]}")
+
 def _summarize_docs(docs):
     try:
         names = [os.path.basename(doc.metadata.get('file_path', '')) for doc in docs]
@@ -122,30 +128,36 @@ class KBState:
 
 kb_state = KBState()
     
-def get_top_documents(query: str):
+def get_top_documents(query: str, req_id=None):
     # global kb_state
-    logger.info(f"Current KB Name: {kb_state.current_kb_name}")
+    _pref = f"[req:{req_id}] " if req_id else ""
+    logger.debug(f"{_pref}KB: {kb_state.current_kb_name}")
     if not kb_state.kb_vectordb or not kb_state.searcher_from_target_doc:
         raise ValueError("Knowledge base not loaded.")
 
     # 适度降低向量检索返回数量，减少后续重排负载
-    logger.info("正在进行向量检索...")
+    logger.debug(f"{_pref}Performing vector and BM25 search...")
     retriever = kb_state.kb_vectordb.as_retriever(search_kwargs={"k": 4})
     # 并行执行向量检索与 BM25 检索以降低总体等待时间
     with ThreadPoolExecutor(max_workers=2) as ex:
         fut_bge = ex.submit(retriever.invoke, query)
-        logger.info("正在进行 BM25 检索...")
+        logger.debug(f"{_pref}BM25 search started")
         fut_bm25 = ex.submit(kb_state.searcher_from_target_doc.search, query, 0.2)
         bge_context = fut_bge.result()
         bm25_context = fut_bm25.result()
+    try:
+        logger.info(f"{_pref}retrieval bge={len(bge_context)} bm25={len(bm25_context)}")
+    except Exception:
+        pass
     # BM25 已经按得分排序，限制候选数量避免过多文档进入重排
     if len(bm25_context) > 8:
         bm25_context = bm25_context[:8]
 
-    logger.info("正在融合向量检索与 BM25 结果...")
+    logger.debug(f"{_pref}Fusing search results...")
     merged_res = bge_context + bm25_context
 
     if len(merged_res) <= 1:
+        logger.info(f"{_pref}retrieval merged={len(merged_res)}")
         return [(merged_res[0], 0.3)] if merged_res else []
 
     # 基于 file_path 去重，避免对长文本 page_content 做哈希比较
@@ -155,12 +167,35 @@ def get_top_documents(query: str):
         if file_path and file_path not in unique_by_path:
             unique_by_path[file_path] = doc
     unique_docs = list(unique_by_path.values())
+    try:
+        logger.info(f"{_pref}unique_docs={len(unique_docs)}")
+    except Exception:
+        pass
 
-    logger.info("正在重排候选文档...")
+    if len(unique_docs) == 1:
+        try:
+            _one_name = os.path.basename(unique_docs[0].metadata.get('file_path', ''))
+            logger.info(f"{_pref}unique_docs=1 skip_rerank name={_one_name}")
+        except Exception:
+            pass
+        return [(unique_docs[0], 0.85)]
+
+    logger.debug(f"{_pref}Reranking documents...")
     reranker = DocumentReranker(get_reranker_model())
     # 控制进入重排的最大候选数量
     candidates = unique_docs[:8]
+    try:
+        _cand_names = [os.path.basename(d.metadata.get('file_path', '')) for d in candidates if d.metadata.get('file_path')]
+        logger.info(f"{_pref}candidates={_cand_names}")
+    except Exception:
+        pass
     top_documents_with_scores = reranker.rerank_documents(query, candidates, top_n=3)
+    try:
+        _sel_names = [os.path.basename(doc.metadata.get('file_path', '')) for doc, _ in top_documents_with_scores if doc.metadata.get('file_path')]
+        _sel_scores = [round(score, 2) for _, score in top_documents_with_scores if _]
+        logger.info(f"{_pref}rerank_top={_sel_names} scores={_sel_scores}")
+    except Exception:
+        pass
 
     # 返回 (Document, score) 且要求存在 file_path 元数据
     return [(doc, round(score, 2)) for doc, score in top_documents_with_scores if doc.metadata.get('file_path')]
@@ -176,8 +211,7 @@ def run_llm_Knowlege_baes_file_QA(query: str, keep_history: bool = True):
         temperature=0.2,
         streaming=True
     )
-    logger.info(f"LLM base_url={openai_api_base} model={config['models']['llm_model']}")
-    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
+    logger.debug(f"LLM model: {config['models']['llm_model']}")
 
     history_str = "\n".join([str(item) for item in kb_state.history]) + "\n这是以上我和你的对话记录，请参考\n"
     # use global kb_state.kb_vectordb; fall back to empty set if not available
@@ -224,8 +258,7 @@ def generate_guiding_questions(num_questions_total=3, num_questions_per_doc=2):
         temperature=0.2,
         streaming=True
     )
-    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
-    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
+    logger.debug(f"LLM model: {config['models']['llm_model']}")
     # global kb_state
     kb_vectordb = kb_state.kb_vectordb
     doc_groups = {}
@@ -284,12 +317,13 @@ def generate_single_question(llm, doc):
     return result.strip()
 
 def get_document_snippets(documents, max_length=800):
+    # 处理单个文档或文档列表
+    if not isinstance(documents, list):
+        documents = [documents]
     snippets = [doc.page_content[:max_length] for doc in documents]
     return "\n".join(snippets)
 
 def document_question_relevance(question, documents):
-    #openai_api_key = "EMPTY"
-    #openai_api_base = config['paths']['openai_api_base']
     llm = ChatOpenAI(
         api_key=config['paths']['openai_api_keys'],
         base_url=config['paths']['openai_api_base'],
@@ -297,120 +331,35 @@ def document_question_relevance(question, documents):
         temperature=0,
         streaming=True
     )
-    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
-    docs_list = documents if isinstance(documents, list) else [documents]
+    logger.debug(f"LLM model: {config['models']['llm_model']}")
 
-
-    try:
-        document = get_document_snippets(docs_list)
-
-        prompt = PromptTemplate(
-            template="""作为文档相关性评估专家，你的任务是判断给定文档是否与用户问题相关。请仔细阅读以下信息：
+    prompt = PromptTemplate(
+        template="""你是一个评分员，评估检索到的文档与用户问题的相关性。
+                    这里是检索到的文档:\n\n {document} \n\n
+                    这是用户的问题:{question} \n
+                    如果文档包含与用户问题相关的关键字，则将其评为相关。
+                    它不需要是一个严格的测试。目标是过滤掉错误的检索。
+                    给出一个二元分数"是"或"否"，以表明该文档是否与问题相关。
+                    以JSON的形式提供二进制分数，其中只有一个关键字'score'，不需要任何开头或解释。""",
+        input_variables=["question", "document"],
+    )
     
-                        用户问题：{question}
+    document = get_document_snippets(documents)
+    retrieval_grader = prompt | llm | JsonOutputParser()
     
-                        文档内容：
-                        {document}
-    
-                        评估指南：
-                        1. 关注文档中与问题相关的关键词、概念或主题。
-                        2. 考虑文档是否提供了回答问题所需的信息或背景。
-                        3. 即使文档不能完全回答问题，只要包含相关信息也可视为相关。
-                        4. 这不是严格的匹配测试，目的是过滤掉明显不相关的文档。
-    
-                        请根据上述指南，给出你的评估结果。
-    
-                        输出要求：
-                        - 仅返回一个JSON对象，包含一个键"score"
-                        - "score"的值必须是"是"或"否"
-                        - 不要包含任何其他解释或评论
-    
-                        示例输出：
-                        {{"score": "是"}}
-                        或
-                        {{"score": "否"}}""",
-                                input_variables=["question", "document"],
-                            )
-
-        rendered_safe = _render_prompt_safe(prompt, question=question, document=document)
-        _log_prompt(rendered_safe)
-        retrieval_grader = prompt | llm | JsonOutputParser()
-        result = retrieval_grader.invoke({"question": question, "document": document})
-    except:
-        first_doc_lines = docs_list[0].page_content.split('\n')
-        prompt = PromptTemplate(
-            template="""作为文本相关性评估专家，你的任务是判断给定的两段文本意思是否相近。请仔细阅读以下信息：
-    
-                        文本一：{question}
-    
-                        文本二：
-                        {document}
-    
-                        评估指南：
-                        1. 关注两段文本的关键词、概念或主题。
-                        2. 即使两端段文本不能完全回答问题，只要包含相关信息也可视为相关。
-    
-                        请根据上述指南，给出你的评估结果。
-    
-                        输出要求：
-                        - 仅返回一个JSON对象，包含一个键"score"
-                        - "score"的值必须是"是"或"否"
-                        - 不要包含任何其他解释或评论
-    
-                        示例输出：
-                        {{"score": "是"}}
-                        或
-                        {{"score": "否"}}""",
-                                input_variables=["question", "document"],
-                            )
-
-        rendered_safe = _render_prompt_safe(prompt, question=question, document=first_doc_lines)
-        _log_prompt(rendered_safe)
-        retrieval_grader = prompt | llm | JsonOutputParser()
-        result = retrieval_grader.invoke({"question": question, "document": first_doc_lines})
-    
+    result = retrieval_grader.invoke({"question": question, "document": document})
     return result['score']
 
-def is_math_question(question):
-    #openai_api_key = "EMPTY"
-    #openai_api_base = config['paths']['openai_api_base']
+def question_generation_from_last_dialogual(last_dialog):
+    """根据上一轮对话生成引导性问题"""
     llm = ChatOpenAI(
         api_key=config['paths']['openai_api_keys'],
         base_url=config['paths']['openai_api_base'],
         model=config['models']['llm_model'],
-        temperature=0.2,
+        temperature=0,
         streaming=True
     )
-    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
-    prompt = PromptTemplate(
-        template="""你是一个问题分类员，评估一个问题是否需要通过计算过程才能回答是否有一系列事实依据。
-                    以下是问题:
-                    \n ------- 
-                    {question}
-                    \n ------
-                    给出一个二元分数“是”或“否”，以表明答案是否基于支持/问题是否需要通过计算过程才能回答。
-                    以JSON形式提供，只有一个关键字‘score’，没有序言或解释。""",
-        input_variables=["question"],
-    )
-    rendered_safe = _render_prompt_safe(prompt, question=question)
-    _log_prompt(rendered_safe)
-    hallucination_grader = prompt | llm | JsonOutputParser()
-    response = hallucination_grader.invoke({"question": question})
-    return response["score"]
-
-def history_list_to_str(history):
-    return "\n".join([str(item) for item in history]) + "\n这是以上我和你的对话记录，请参考\n"
-
-def question_generation_from_last_dialogual(last_dialog: str):
-    llm = ChatOpenAI(
-        api_key=config['paths']['openai_api_keys'],
-        base_url=config['paths']['openai_api_base'],
-        model=config['models']['llm_model'],
-        temperature=0.2,
-        streaming=False
-    )
-    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
-    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
+    logger.debug(f"LLM model: {config['models']['llm_model']}")
 
     prompt = PromptTemplate(
         template="""你是一名问题引导专家，请根据上一轮的对话，提出3个引导性问题。每个问题之间用换行符分隔。
@@ -418,28 +367,11 @@ def question_generation_from_last_dialogual(last_dialog: str):
                     问题前不需要任何序号。
                     问题内容要简洁明确，确保有明确的主题。
                     引导性问题要能够启发用户进一步思考或提问。
-                    示例 1：
-                    上一轮对话记录：
-                    用户：我最近对机器学习很感兴趣，但不知道从哪里开始。你有什么建议吗？
-                    AI：你可以从学习基础概念开始，比如监督学习和无监督学习，然后逐步深入到常见的算法和应用领域。
-                    引导性问题：
-                    你对监督学习和无监督学习的区别有什么了解吗？
-                    你是否有兴趣了解一些常见的机器学习算法，比如决策树和神经网络？
-                    你目前有接触到哪些与机器学习相关的项目或资源？
-                    示例 2：
-                    上一轮对话记录：
-                    用户：我最近在学习Python编程，但是遇到了一些困难，特别是在理解面向对象编程的概念时。
-                    AI：面向对象编程（OOP）是Python中的一个重要概念，它包括类和对象的使用，封装、继承和多态等特性。
-                    引导性问题：
-                    你对类和对象的概念有具体的疑问吗？
-                    你想了解封装、继承和多态这些特性是如何在Python中实现的吗？
-                    你是否遇到了具体的编程问题，可以举个例子吗？
                     这是上一轮对话的记录：{last_dialog}
                     请直接生成问题，不需要任何开头或解释。请根据上述要求生成引导性问题：""",
         input_variables=["last_dialog"]
     )
-    rendered_safe = _render_prompt_safe(prompt, last_dialog=last_dialog)
-    _log_prompt(rendered_safe)
+    
     rag_chain = (
         {"last_dialog": RunnablePassthrough()}
         | prompt
@@ -451,7 +383,7 @@ def question_generation_from_last_dialogual(last_dialog: str):
     derived_questions = [question for question in derived_questions_str.strip().split("\n") if question]
     return derived_questions
 
-def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_from_user: str, temperature: float, multiple_dialogue: bool, derivation: bool, show_source: bool):
+def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_from_user: str, temperature: float, multiple_dialogue: bool, derivation: bool, show_source: bool, req_id=None):
     llm = ChatOpenAI(
         api_key=config['paths']['openai_api_keys'],
         base_url=config['paths']['openai_api_base'],
@@ -459,25 +391,32 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         temperature=temperature,
         streaming=True
     )
-    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
-    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
+    _pref = f"[req:{req_id}] " if req_id else ""
+    logger.debug(f"{_pref}LLM model: {config['models']['llm_model']}")
     # global kb_state
-    logger.info("enter run_llm_MulitDocQA")
-    try:
-        logger.info(f"kb_state.current_kb_name={kb_state.current_kb_name} kb_vectordb_is_none={kb_state.kb_vectordb is None}")
-    except Exception:
-        logger.info(f"kb_state: {kb_state}")
-    if len(input_query) == 1:
-        query = input_query[0].content
-        history_str = ""
-    elif len(input_query) == 2:
+    logger.debug(f"{_pref}Processing KB QA request")
+    logger.debug(f"{_pref}KB loaded: {kb_state.current_kb_name}")
+    
+    # 处理多轮对话：从 messages 列表中提取问题和历史
+    if multiple_dialogue and len(input_query) > 1:
         query = input_query[-1].content
-        history_str = history_list_to_str([query[0]])
+        # 构建历史对话字符串
+        history_items = []
+        for msg in input_query[:-1]:
+            role = getattr(msg, 'role', 'user')
+            content = getattr(msg, 'content', '')
+            if role == 'user':
+                history_items.append(f"用户：{content}")
+            elif role == 'assistant':
+                history_items.append(f"AI：{content}")
+        history_str = "\n".join(history_items) + "\n这是以上我和你的对话记录，请参考\n" if history_items else ""
     else:
-        query = input_query[-1].content
-        history_str = history_list_to_str([query[0:-1]])
-#    history_str = history_list_to_str(history)
-    logger.info(f"input_query: {input_query}")
+        query = input_query[-1].content if input_query else ""
+        history_str = ""
+    
+    logger.info(f"{_pref}Query: {query[:100]}..." if len(str(query)) > 100 else f"{_pref}Query: {query}")
+    logger.debug(f"{_pref}Message count: {len(input_query)}, Multiple dialogue: {multiple_dialogue}")
+    
     
     def generate_prompt(template, input_variables):
         return PromptTemplate(template=template, input_variables=input_variables)
@@ -486,90 +425,61 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         return prompt | llm | StrOutputParser()
     
     if only_chatKBQA:
-        top_documents_with_socre = get_top_documents(query)
+        top_documents_with_socre = get_top_documents(query, req_id=req_id)
         top_documents = [doc for doc, score in top_documents_with_socre]
-
         try:
-            top_documents[0].metadata["isQA"]
-            if document_question_relevance(query, top_documents[0]) == '是':
-                logger.info("问题和问答文档相关")
-                answer = "\n".join(top_documents[0].page_content.split('\n')[1:])
-                logger.info(f"answer (truncated 200 chars): {answer[:200]}")
-                if top_documents[0].metadata["file_url"] != '-':
-                    str_l = len(answer[:-1])
-                    try:
-                        for i in range(str_l // 3):
-                            logger.info(answer[:-1][i*3:(i+1)*3])
-                            yield stream_type(answer[:-1][i*3:(i+1)*3])
-                            time.sleep(0.2)
-                        yield stream_type(answer[:-1][(i+1)*3:(i+1)*3 + str_l%3])
+            _names = [os.path.basename(doc.metadata.get('file_path', '')) for doc, _ in top_documents_with_socre if doc.metadata.get('file_path')]
+            _scores = [score for _, score in top_documents_with_socre]
+            logger.info(f"{_pref}selected_docs={_names} scores={_scores}")
+        except Exception:
+            pass
+
+        thr = float(config['settings'].get('rerank_direct_answer_threshold', 0.8))
+        thr_any = float(config['settings'].get('rerank_min_relevance', 0.2))
+        score0 = (top_documents_with_socre[0][1] if top_documents_with_socre else 0.0)
+        direct = bool(top_documents) and bool(top_documents[0].metadata.get("isQA")) and score0 >= thr
+
+        if direct:
+            answer = "\n".join(top_documents[0].page_content.split('\n')[1:])
+            logger.info(f"{_pref}direct_answer score={round(score0,2)}")
+            if top_documents[0].metadata.get("file_url") and top_documents[0].metadata["file_url"] != '-':
+                str_l = len(answer[:-1])
+                try:
+                    for i in range(str_l // 3):
+                        logger.debug(answer[:-1][i*3:(i+1)*3])
+                        yield stream_type(answer[:-1][i*3:(i+1)*3])
                         time.sleep(0.2)
-                        yield stream_type_url(answer[-1],top_documents[0].metadata["file_url"])
-                    except:
-                        yield stream_type_url(answer,top_documents[0].metadata["file_url"])
-
-                else:
-                    str_l = len(answer)
-
-                    try:
-                        for i in range(str_l // 3):
-                            logger.info(answer[i*3:(i+1)*3])
-                            yield stream_type(answer[i*3:(i+1)*3])
-                            time.sleep(0.2)
-                        yield stream_type(answer[(i+1)*3:(i+1)*3 + str_l%3])
-                    except:
-                        yield stream_type(answer)
+                    yield stream_type(answer[:-1][(i+1)*3:(i+1)*3 + str_l%3])
+                    time.sleep(0.2)
+                    yield stream_type_url(answer[-1], top_documents[0].metadata["file_url"])
+                except:
+                    yield stream_type_url(answer, top_documents[0].metadata["file_url"])
             else:
-                logger.info("问题和问答文档不相关")
-                if document_question_relevance(query, top_documents) == '是':
-                    logger.info("文档和问题相关")
-                    template = (prompt_template_from_user or "您是一位大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
-                                (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
-                                "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
-                    
-                    input_variables = ["query", "top_documents"]
-                    if multiple_dialogue:
-                        input_variables.append("history")
-                    
-                    prompt = generate_prompt(template, input_variables)
-                    chain = create_chain(prompt)
-                    
-                    inputs = {"query": query, "top_documents": top_documents}
-                    if multiple_dialogue:
-                        inputs["history"] = history_str
-                    
-                    format_inputs = {k: inputs[k] for k in prompt.input_variables if k in inputs}
-                    rendered_safe = _render_prompt_safe(prompt, **format_inputs)
-                    _log_prompt(rendered_safe)
-                    response_text = ""
-                    for chunk in chain.stream(inputs):
-                        response_text += chunk
-                        yield stream_type(chunk)
-                    
-                    #update_history(query, response_text)
-                else:
-                    yield f"data: {json.dumps(create_response_dict(content='没有检索到与查询相关的上下文信息,对不起,知识库中没有找到可以回答此问题的相关信息。', image_list=None, documents=None, sources=None), ensure_ascii=False)}\n\n".encode('utf-8')
-
-        ###########################################################################################
-
-        except:
-            if document_question_relevance(query, top_documents) == '是':
+                str_l = len(answer)
+                try:
+                    for i in range(str_l // 3):
+                        logger.debug(answer[i*3:(i+1)*3])
+                        yield stream_type(answer[i*3:(i+1)*3])
+                        time.sleep(0.2)
+                    yield stream_type(answer[(i+1)*3:(i+1)*3 + str_l%3])
+                except:
+                    yield stream_type(answer)
+        else:
+            if score0 < thr_any:
+                yield f"data: {json.dumps(create_response_dict(content='没有检索到与查询相关的上下文信息,对不起,知识库中没有找到可以回答此问题的相关信息。', image_list=None, documents=None, sources=None), ensure_ascii=False)}\n\n".encode('utf-8')
+            else:
                 logger.info("文档和问题相关")
                 template = (prompt_template_from_user or "您是一位大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                             (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                             "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
-                
                 input_variables = ["query", "top_documents"]
                 if multiple_dialogue:
                     input_variables.append("history")
-                
                 prompt = generate_prompt(template, input_variables)
                 chain = create_chain(prompt)
-                
                 inputs = {"query": query, "top_documents": top_documents}
                 if multiple_dialogue:
                     inputs["history"] = history_str
-                
                 format_inputs = {k: inputs[k] for k in prompt.input_variables if k in inputs}
                 rendered_safe = _render_prompt_safe(prompt, **format_inputs)
                 _log_prompt(rendered_safe)
@@ -577,121 +487,57 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                 for chunk in chain.stream(inputs):
                     response_text += chunk
                     yield stream_type(chunk)
-                
-                #update_history(query, response_text)
-            else:
-                yield f"data: {json.dumps(create_response_dict(content='没有检索到与查询相关的上下文信息,对不起,知识库中没有找到可以回答此问题的相关信息。', image_list=None, documents=None, sources=None), ensure_ascii=False)}\n\n".encode('utf-8')
     else:
         top_documents_with_socre = get_top_documents(query)
         top_documents = [doc for doc, score in top_documents_with_socre]
-        document_question_relevance(query, top_documents[0])
-        try:
-            top_documents[0].metadata["isQA"]
-            logger.info(f"document_question_relevance: {document_question_relevance(query, top_documents[0])}")
-            if document_question_relevance(query, top_documents[0]) == '是':
-                logger.info("问题和问答文档相关")
-                answer = "\n".join(top_documents[0].page_content.split('\n')[1:])
-                logger.info(f"file_url: {top_documents[0].metadata.get('file_url')}")
-                logger.info("===")
-                if top_documents[0].metadata["file_url"] != '-':
-                    str_l = len(answer[:-1])
-                    try:
-                        for i in range(str_l // 3):
-                            logger.info(answer[:-1][i*3:(i+1)*3])
-                            yield stream_type(answer[:-1][i*3:(i+1)*3])
-                            time.sleep(0.2)
-                        yield stream_type(answer[:-1][(i+1)*3:(i+1)*3 + str_l%3])
+        thr = float(config['settings'].get('rerank_direct_answer_threshold', 0.8))
+        thr_any = float(config['settings'].get('rerank_min_relevance', 0.2))
+        score0 = (top_documents_with_socre[0][1] if top_documents_with_socre else 0.0)
+        direct = bool(top_documents) and bool(top_documents[0].metadata.get("isQA")) and score0 >= thr
+
+        if direct:
+            answer = "\n".join(top_documents[0].page_content.split('\n')[1:])
+            logger.info(f"{_pref}direct_answer score={round(score0,2)}")
+            if top_documents[0].metadata.get("file_url") and top_documents[0].metadata["file_url"] != '-':
+                str_l = len(answer[:-1])
+                try:
+                    for i in range(str_l // 3):
+                        logger.debug(answer[:-1][i*3:(i+1)*3])
+                        yield stream_type(answer[:-1][i*3:(i+1)*3])
                         time.sleep(0.2)
-                        
-                        yield stream_type_url(answer[-1],top_documents[0].metadata["file_url"])
-                    except:
-                        yield stream_type_url(answer,top_documents[0].metadata["file_url"])
-
-                else:
-                    str_l = len(answer)
-
-                    try:
-                        for i in range(str_l // 3):
-                            logger.info(answer[i*3:(i+1)*3])
-                            yield stream_type(answer[i*3:(i+1)*3])
-                            time.sleep(0.2)
-                        yield stream_type(answer[(i+1)*3:(i+1)*3 + str_l%3])
-                    except:
-                        yield stream_type(answer)
-
+                    yield stream_type(answer[:-1][(i+1)*3:(i+1)*3 + str_l%3])
+                    time.sleep(0.2)
+                    yield stream_type_url(answer[-1], top_documents[0].metadata["file_url"])
+                except:
+                    yield stream_type_url(answer, top_documents[0].metadata["file_url"])
             else:
-                logger.info("问题和问答文档不相关")
-                if document_question_relevance(query, top_documents) == '是':
-                    logger.info("文档和问题相关")
-                    template = (prompt_template_from_user or "您是一位大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
-                                (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
-                                "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
-                    
-                    input_variables = ["query", "top_documents"]
-                    if multiple_dialogue:
-                        input_variables.append("history")
-                    
-                    prompt = generate_prompt(template, input_variables)
-                    chain = create_chain(prompt)
-                    
-                    inputs = {"query": query, "top_documents": top_documents}
-                    if multiple_dialogue:
-                        inputs["history"] = history_str
-                    
-                    format_inputs = {k: inputs[k] for k in prompt.input_variables if k in inputs}
-                    rendered_safe = _render_prompt_safe(prompt, **format_inputs)
-                    _log_prompt(rendered_safe)
-                    response_text = ""
-                    for chunk in chain.stream(inputs):
-                        response_text += chunk
-                        yield stream_type(chunk)
-
-                else:
-                    if prompt_template_from_user:
-                        template = ("以上是历史信息{history_str}，" if multiple_dialogue else "") + \
-                        prompt_template_from_user + "根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
-                    else:
-                        template = ("以上是历史信息{history_str}，" if multiple_dialogue else "") + \
-                            "您是一位大型语言人工智能助手。热情有礼貌的和用户进行交互，根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
-                
-                    input_variables = ["query"]
-                    if multiple_dialogue:
-                        input_variables.append("history")
-                    
-                    prompt = generate_prompt(template, input_variables)
-                    chain = create_chain(prompt)
-                    
-                    inputs = {"query": query}
-                    if multiple_dialogue:
-                        inputs["history_str"] = history_str
-                    
-                    response_text = ""
-                    for chunk in chain.stream(inputs):
-                        response_text += chunk
-                        yield stream_type(chunk)
-                    
-                    #update_history(query, response_text)
-
-        ###########################################################################################
-        except:
-            if document_question_relevance(query, top_documents) == '是':
+                str_l = len(answer)
+                try:
+                    for i in range(str_l // 3):
+                        logger.debug(answer[i*3:(i+1)*3])
+                        yield stream_type(answer[i*3:(i+1)*3])
+                        time.sleep(0.2)
+                    yield stream_type(answer[(i+1)*3:(i+1)*3 + str_l%3])
+                except:
+                    yield stream_type(answer)
+        else:
+            if score0 < thr_any:
+                logger.debug("No relevant documents found, falling back to only_llm")
+                for chunk in only_llm(input_query, prompt_template_from_user, temperature, multiple_dialogue):
+                    yield chunk
+            else:
                 logger.info("文档和问题相关")
-
                 template = (prompt_template_from_user or "您是一位大型语言人工智能助手。请严格根据段落内容分点作答用户问题，请极大程度保留段落的格式与内容进行简要回答。如果涉及计算请按步骤进行计算，注意不要杜撰段落没有提及的要点，且不要重复。如果文档中出现代码相关的信息，可以将完整代码返回，如果给出的段落信息与原文无关") + \
                             (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                             "\n以下是相关段落:{top_documents},下面是用户问题：{query} 回答："
-                
                 input_variables = ["query", "top_documents"]
                 if multiple_dialogue:
                     input_variables.append("history")
-                
                 prompt = generate_prompt(template, input_variables)
                 chain = create_chain(prompt)
-                
                 inputs = {"query": query, "top_documents": top_documents}
                 if multiple_dialogue:
                     inputs["history"] = history_str
-                
                 format_inputs = {k: inputs[k] for k in prompt.input_variables if k in inputs}
                 rendered_safe = _render_prompt_safe(prompt, **format_inputs)
                 _log_prompt(rendered_safe)
@@ -699,35 +545,9 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                 for chunk in chain.stream(inputs):
                     response_text += chunk
                     yield stream_type(chunk)
-                
-                #update_history(query, response_text)
-        
-            else:
-                if prompt_template_from_user:
-                    template = ("以上是历史信息{history_str}，" if multiple_dialogue else "") + \
-                    prompt_template_from_user + "根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
-                else:
-                    template = ("以上是历史信息{history_str}，" if multiple_dialogue else "") + \
-                        "您是一位大型语言人工智能助手。热情有礼貌的和用户进行交互，根据用户的要求或提问{query},及时给用户满意的反馈和回答。回复："
-                                
-                input_variables = ["query"]
-                if multiple_dialogue:
-                    input_variables.append("history")
-                
-                prompt = generate_prompt(template, input_variables)
-                chain = create_chain(prompt)
-                
-                inputs = {"query": query}
-                if multiple_dialogue:
-                    inputs["history_str"] = history_str
-                
-                response_text = ""
-                for chunk in chain.stream(inputs):
-                    response_text += chunk
-                    yield stream_type(chunk)
 
 
-def only_llm(input_query: str, only_chatKBQA: bool, prompt_template_from_user: str, temperature: float, multiple_dialogue: bool, derivation: bool, show_source: bool):
+def only_llm(input_query: str, prompt_template_from_user: str = "", temperature: float = 0.5, multiple_dialogue: bool = False):
     llm = ChatOpenAI(
         api_key=config['paths']['openai_api_keys'],
         base_url=config['paths']['openai_api_base'],
@@ -735,19 +555,28 @@ def only_llm(input_query: str, only_chatKBQA: bool, prompt_template_from_user: s
         temperature=temperature,
         streaming=True
     )
-    logger.info(f"LLM base_url={config['paths']['openai_api_base']} model={config['models']['llm_model']}")
-    logger.info(f"LLM resolved_base_url={getattr(getattr(llm,'client', None),'base_url', None)} resolved_model={getattr(llm, 'model_name', getattr(llm, 'model', None))}")
-    if len(input_query) == 1:
-        query = input_query[0].content
-        history_str = ""
-    elif len(input_query) == 2:
+    logger.debug(f"LLM model: {config['models']['llm_model']}")
+    
+    # 处理多轮对话：从 messages 列表中提取问题和历史
+    if multiple_dialogue and len(input_query) > 1:
         query = input_query[-1].content
-        history_str = history_list_to_str([query[0]])
+        # 构建历史对话字符串
+        history_items = []
+        for msg in input_query[:-1]:
+            role = getattr(msg, 'role', 'user')
+            content = getattr(msg, 'content', '')
+            if role == 'user':
+                history_items.append(f"用户：{content}")
+            elif role == 'assistant':
+                history_items.append(f"AI：{content}")
+        history_str = "\n".join(history_items) + "\n这是以上我和你的对话记录，请参考\n" if history_items else ""
     else:
-        query = input_query[-1].content
-        history_str = history_list_to_str([query[0:-1]])
+        query = input_query[-1].content if input_query else ""
+        history_str = ""
 #    history_str = history_list_to_str(history)
-    logger.info(f"only_llm input_query: {input_query}")
+    logger.debug(f"Query: {query[:100]}..." if len(str(query)) > 100 else f"Query: {query}")
+    logger.debug(f"Message count: {len(input_query)}, Multiple dialogue: {multiple_dialogue}")
+    
     
     def generate_prompt(template, input_variables):
         return PromptTemplate(template=template, input_variables=input_variables)

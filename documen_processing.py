@@ -19,6 +19,7 @@ import numpy as np
 from PIL import Image
 import io
 import json
+import zipfile
 
 from docx import Document as Document2
 
@@ -32,6 +33,7 @@ ENABLE_OCR_IMAGES = bool(_cfg.get("settings", {}).get("enable_ocr_images", False
 ENABLE_PDF_PIX2TEXT = bool(_cfg.get("settings", {}).get("enable_pdf_pix2text", False))
 URL_OCR = _cfg.get("paths", {}).get("ocr_service_url", "http://127.0.0.1:8001/detection_pic")
 URL_PIX2TEXT = _cfg.get("paths", {}).get("pix2text_url", "http://127.0.0.1:8503/pix2text")
+OCR_TIMEOUT = int(_cfg.get("settings", {}).get("ocr_timeout_secs", 30))
 url_f = URL_OCR
 
 # Ensure pandoc is available for pypandoc on Windows
@@ -250,42 +252,75 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                     markdown_text = ""
             
             c = 1
-            pattern_1 = r"/media/(image\d+\.png)"
-            pattern_2 = r"/media/(image\d+\.jpeg)"
+            img_md_pattern = r"!\[[^\]]*\]\(([^)]+)\)"
+            base_path = os.path.join(media_dir, "media")
 
             all_text = ""
+            img_found = 0
             for i in markdown_text.split("\n"):
-                if "media/" in i and "{width=" in i:
-                    matches = re.findall(pattern_1, i)
+                handled_image = False
+                if "media/" in i:
+                    matches = re.findall(img_md_pattern, i)
+                    img_path = None
+                    if matches:
+                        rel = matches[0]
+                        if rel.startswith("media/"):
+                            img_path = os.path.join(media_dir, rel.replace('/', os.sep))
+                            handled_image = True
+                    if not handled_image:
+                        m = re.search(r"media/(image\d+\.(?:png|jpe?g|gif|bmp))", i, flags=re.IGNORECASE)
+                        if m:
+                            img_path = os.path.join(base_path, m.group(1))
+                            handled_image = True
 
-                    if matches == []:
-                        matches = re.findall(pattern_2, i)
-
-                    base_path = media_dir + "/media/"
-                    jpg_file = base_path + matches[0]
-                    
-                    # OCR via external service; make this best-effort
-                    if ENABLE_OCR_IMAGES:
+                    if handled_image and img_path and ENABLE_OCR_IMAGES:
                         try:
-                            logging.info(f"[OCR] request {url_f} file={jpg_file}")
-                            with open(jpg_file, "rb") as file:
+                            logging.info(f"[OCR] request {url_f} file={img_path}")
+                            with open(img_path, "rb") as file:
                                 files = {"file": file}
-                                response = requests.post(url_f, files=files, timeout=10)
+                                response = requests.post(url_f, files=files, timeout=OCR_TIMEOUT)
                             response.raise_for_status()
                             outs = response.json().get("detection_result", "")
-                            all_text += '图片识别内容\n'
-                            all_text += outs
-                            all_text += "\n"
-                            logging.info(f"[OCR] success file={jpg_file} len={len(outs)}")
-                        except Exception as ocr_err:
-                            pass
+                            if outs:
+                                all_text += "图片识别内容\n" + outs + "\n"
+                                img_found += 1
+                            logging.info(f"[OCR] success file={img_path} len={len(outs)}")
+                        except Exception:
+                            logging.exception(f"[OCR] failed file={img_path}")
+
                     if "height=" not in i:
                         c = 0
                 elif c != 0:
-                    all_text += i
-                    all_text += "\n"
+                    all_text += i + "\n"
                 else:
                     c = 1
+
+            if ENABLE_OCR_IMAGES and img_found == 0:
+                try:
+                    out_media = os.path.join(media_dir, "media")
+                    os.makedirs(out_media, exist_ok=True)
+                    with zipfile.ZipFile(doc_file) as zf:
+                        for name in zf.namelist():
+                            nl = name.lower()
+                            if nl.startswith("word/media/") and (nl.endswith(".png") or nl.endswith(".jpg") or nl.endswith(".jpeg") or nl.endswith(".bmp") or nl.endswith(".gif")):
+                                dest = os.path.join(out_media, os.path.basename(name))
+                                if not os.path.exists(dest):
+                                    with zf.open(name) as src, open(dest, "wb") as dst:
+                                        dst.write(src.read())
+                                try:
+                                    logging.info(f"[OCR] request {url_f} file={dest}")
+                                    with open(dest, "rb") as file:
+                                        files = {"file": file}
+                                        response = requests.post(url_f, files=files, timeout=OCR_TIMEOUT)
+                                    response.raise_for_status()
+                                    outs = response.json().get("detection_result", "")
+                                    if outs:
+                                        all_text += "图片识别内容\n" + outs + "\n"
+                                    logging.info(f"[OCR] success file={dest} len={len(outs)}")
+                                except Exception:
+                                    logging.exception(f"[OCR] failed file={dest}")
+                except Exception:
+                    logging.exception(f"[DOCX] media unzip failed file={doc_file}")
             
             #docu = Document2(doc_file)
             """
@@ -297,11 +332,6 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                     markdown_text += i.text
             """
             if len(all_text.replace(" ","").replace("\n","")) == 0:
-                if os.path.exists(doc_file):
-                    os.remove(doc_file)
-                    print(f"文件 '{doc_file}' 已被删除。")
-                else:
-                    print(f"文件 '{doc_file}' 不存在。")
                 raise ValueError(f"The file {os.path.basename(doc_file)} does not contain valid content.")
             # 生成 Markdown 文件的路径
             markdown_file = os.path.join(markdown_directory, os.path.splitext(os.path.basename(doc_file))[0] + ".md")
@@ -595,7 +625,7 @@ def pdf_to_markdown(url, pdf_file_path, markdown_file_path, extract_images=False
 
         all_text = ''
         for i in images:
-            image = Image.fromarray(np.array(images[0]))
+            image = Image.fromarray(np.array(i))
             image_byte_array = io.BytesIO()
             image.save(image_byte_array, format='JPEG')
             image_byte_array = image_byte_array.getvalue()
