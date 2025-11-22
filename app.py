@@ -73,6 +73,9 @@ app.add_middleware(
 # Simple request logging middleware
 @app.middleware("http")
 async def log_requests(request: Request, call_next):
+    """
+    请求日志中间件，记录每个请求的基本信息和处理时间
+    """
     start = time.time()
     method = request.method
     path = request.url.path
@@ -88,19 +91,17 @@ async def log_requests(request: Request, call_next):
         logger.exception(f"[req:{req_id}] {method} {path} failed after {duration_ms:.1f}ms: {e}")
         raise
 
-# Global variables
-# UPLOAD_DIRECTORY = "uploads" 
-# os.makedirs(UPLOAD_DIRECTORY, exist_ok=True)
-# #定义知识库状态
-
-
-# response_text = ""
-
 class Message(BaseModel):
+    """
+    消息模型，用于表示对话中的单条消息
+    """
     role: str
     content: str
 
 class PromptRequest(BaseModel):
+    """
+    提示请求模型，定义了API请求的数据结构
+    """
     model: str = Field(default="Qwen1.5-32B-Chat")
     messages: List[Message]
     temperature: float = Field(default=0.5)
@@ -117,7 +118,11 @@ class PromptRequest(BaseModel):
     multiple_dialogue: bool = Field(default=False)
     derivation: bool = Field(default=False)
     show_source: bool = Field(default=False)
+
 class FinalResponseRequest(BaseModel):
+    """
+    最终响应请求模型
+    """
     current_dialog: Dict[str, str]
     show_source: bool
     derivation: bool
@@ -130,6 +135,12 @@ class FinalResponseRequest(BaseModel):
 
 @app.get("/list_kb")
 async def list_kb_api():
+    """
+    列出所有知识库
+    
+    Returns:
+        JSONResponse: 包含知识库名称列表的响应
+    """
     try:
         KB_DIR = config['paths']['kb_dir']
         if not os.path.exists(KB_DIR):
@@ -144,6 +155,15 @@ async def list_kb_api():
 
 @app.post("/delete_kb")
 async def delete_kb(kb_name: str = Form(...)):
+    """
+    删除指定的知识库
+    
+    Args:
+        kb_name (str): 要删除的知识库名称
+        
+    Returns:
+        JSONResponse: 删除结果响应
+    """
     KB_dir = config['paths']['kb_dir']
     kb_dir = os.path.join(KB_dir, kb_name)
 
@@ -162,6 +182,16 @@ async def delete_kb(kb_name: str = Form(...)):
 
 @app.post("/update_vectordb")
 async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] = File(...)):
+    """
+    更新向量数据库，处理上传的文件并构建知识库
+    
+    Args:
+        kb_name (str): 知识库名称
+        files (List[UploadFile]): 上传的文件列表
+        
+    Returns:
+        JSONResponse: 更新结果响应
+    """
     KB_DIR = config['paths']['kb_dir']
     kb_dir = os.path.join(KB_DIR, kb_name)
     upload_directory = os.path.join(kb_dir, "uploads")
@@ -243,12 +273,21 @@ async def update_vectordb_api(kb_name: str = Form(...), files: List[UploadFile] 
 
 @app.get("/logs")
 async def get_logs(lines: int = 200):
+    """
+    获取日志内容
+    
+    Args:
+        lines (int): 返回的日志行数，默认200行
+        
+    Returns:
+        JSONResponse: 包含日志内容的响应
+    """
     try:
         if not os.path.exists(LOG_FILE):
             return JSONResponse(status_code=200, content={"code": 200, "message": "log file not found", "lines": []})
         with open(LOG_FILE, "r", encoding="utf-8", errors="ignore") as f:
             content = f.read()
-        logs = content.splitlines()[-max(1, min(lines, 2000)):]  # 防止一次性返回过多
+        logs = content.splitlines()[-max(1, min(lines, 2000))]  # 防止一次性返回过多
         return JSONResponse(status_code=200, content={"code": 200, "lines": logs})
     except Exception as e:
         error_message = str(e)
@@ -256,6 +295,14 @@ async def get_logs(lines: int = 200):
         return JSONResponse(status_code=500, content={"code": 500, "message": error_message})
 
 async def update_global_state(kb_name, kb, state):
+    """
+    更新全局状态，包括知识库实例、向量数据库、BM25搜索器等
+    
+    Args:
+        kb_name (str): 知识库名称
+        kb (KnowledgeBase): 知识库实例
+        state: 全局状态对象
+    """
     state.kb = kb
     state.kb_vectordb = await state.kb.load_vectordb()
     state.history = []
@@ -354,6 +401,15 @@ async def update_global_state(kb_name, kb, state):
 
 @app.post("/view_guiding_questions")
 async def view_guiding_questions_api(request: Request):
+    """
+    查看引导性问题
+    
+    Args:
+        request (Request): HTTP请求对象
+        
+    Returns:
+        JSONResponse: 包含引导性问题列表的响应
+    """
     try:
         request_body = await request.json()
         kb_name = request_body.get('kb_name')
@@ -422,6 +478,16 @@ async def view_guiding_questions_api(request: Request):
 
 @app.post("/remove_file")
 async def remove_file_api(kb_name: str = Form(...), file_name: str = Form(...)):
+    """
+    从知识库中删除指定文件
+    
+    Args:
+        kb_name (str): 知识库名称
+        file_name (str): 要删除的文件名
+        
+    Returns:
+        JSONResponse: 删除结果响应
+    """
     KB_DIR = config['paths']['kb_dir']
     kb_dir = os.path.join(KB_DIR, kb_name)
     
@@ -444,6 +510,15 @@ async def remove_file_api(kb_name: str = Form(...), file_name: str = Form(...)):
 
 @app.post("/mulitdoc_qa")
 async def run_llm_mulitdoc_qa_api(request: Request):
+    """
+    多文档问答接口
+    
+    Args:
+        request (Request): HTTP请求对象，包含用户查询和相关参数
+        
+    Returns:
+        StreamingResponse 或 JSONResponse: 流式响应或JSON响应
+    """
     try:
         request_data = await request.json()
         prompt_request = PromptRequest(**request_data)
@@ -599,6 +674,15 @@ async def run_llm_mulitdoc_qa_api(request: Request):
     
 @app.post("/final_response")
 async def get_final_response(request: FinalResponseRequest):
+    """
+    获取最终响应，包括文档来源、派生问题等信息
+    
+    Args:
+        request (FinalResponseRequest): 最终响应请求对象
+        
+    Returns:
+        JSONResponse: 包含完整响应信息的JSON响应
+    """
     top_documents_with_score = get_top_documents(request.query)
     
     final_response = create_final_response(
@@ -612,6 +696,15 @@ async def get_final_response(request: FinalResponseRequest):
 
 @app.get("/display_image")
 async def display_image(image_url: str):
+    """
+    显示图片
+    
+    Args:
+        image_url (str): 图片URL
+        
+    Returns:
+        FileResponse: 图片文件响应
+    """
     try:
         from urllib.parse import unquote, urlparse
         u = unquote(image_url.strip())
@@ -633,6 +726,9 @@ async def display_image(image_url: str):
         raise HTTPException(status_code=500, detail={"code": 500, "message": str(e)})
 
 class QueryRequest(BaseModel):
+    """
+    查询请求模型
+    """
     model: str = Field(default="Qwen1.5-32B-Chat")
     messages: List[Message]
     temperature: float = Field(default=0.5)
@@ -647,6 +743,15 @@ class QueryRequest(BaseModel):
 
 @app.post("/Knowlege_baes_file_QA")
 async def run_llm_Knowlege_baes_file_QA_api(request: Request):
+    """
+    基于知识库文件的问答接口
+    
+    Args:
+        request (Request): HTTP请求对象
+        
+    Returns:
+        StreamingResponse: 流式响应
+    """
     try:
         request_data = await request.json()
         prompt_request = PromptRequest(**request_data)
@@ -675,6 +780,12 @@ async def run_llm_Knowlege_baes_file_QA_api(request: Request):
 
 
 def custom_openapi():
+    """
+    自定义OpenAPI文档
+    
+    Returns:
+        dict: OpenAPI文档字典
+    """
     if app.openapi_schema:
         return app.openapi_schemas
     openapi_schema = get_openapi(

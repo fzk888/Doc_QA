@@ -30,7 +30,17 @@ logger = logging.getLogger("docqa.kb")
 MAX_WORKERS = config['system'].get('max_workers', 4)
 
 class KnowledgeBase:
+    """
+    知识库管理类，负责处理文档解析、向量化、索引构建和管理等功能
+    """
     def __init__(self, kb_name, embeddings):
+        """
+        初始化知识库
+        
+        Args:
+            kb_name (str): 知识库名称
+            embeddings: 嵌入模型实例
+        """
         self.kb_name = kb_name
         self.embeddings = embeddings
         KB_DIR = config['paths']['kb_dir']
@@ -47,6 +57,12 @@ class KnowledgeBase:
         self.executor = ProcessPoolExecutor(max_workers=MAX_WORKERS)
 
     async def load_vectordb(self):
+        """
+        异步加载向量数据库
+        
+        Returns:
+            向量数据库实例或None（如果加载失败）
+        """
         if self.vectordb is None:
             faiss_index_path = os.path.join(self.base_directory, self.kb_name, "faiss_index")
             if os.path.exists(faiss_index_path):
@@ -60,6 +76,15 @@ class KnowledgeBase:
         return self.vectordb
 
     async def process_files(self, files):
+        """
+        异步处理上传的文件，将其解析为文档分块
+        
+        Args:
+            files (list): 文件路径列表
+            
+        Returns:
+            list: 解析后的文档分块列表
+        """
         logger.info("正在解析并分块上传文件...")
         start = time.time()
 
@@ -182,6 +207,15 @@ class KnowledgeBase:
         return all_md_header_splits
 
     async def vectorize_documents(self, documents):
+        """
+        异步将文档向量化并构建FAISS索引
+        
+        Args:
+            documents (list): 文档列表
+            
+        Returns:
+            FAISS向量数据库实例
+        """
         logger.info("正在构建向量索引（FAISS）...")
         start = time.time()
         # 每批处理的文档数（可通过 config.yaml 的 settings.vector_batch_size 调整）
@@ -211,6 +245,9 @@ class KnowledgeBase:
         return vectordb
 
     def clean_gpu_cache(self):
+        """
+        清理GPU缓存，释放内存
+        """
         if torch.cuda.is_available():
             gc.collect()
             torch.cuda.empty_cache()
@@ -218,17 +255,35 @@ class KnowledgeBase:
 
 
     async def save_vectordb(self, vectordb):
+        """
+        异步保存向量数据库到磁盘
+        
+        Args:
+            vectordb: 向量数据库实例
+        """
         logger.info("正在保存向量索引到磁盘...")
         faiss_index_path = os.path.join(self.base_directory, self.kb_name, "faiss_index")
         await asyncio.to_thread(vectordb.save_local, faiss_index_path)
 
     async def get_faiss_vectordb(self, files):
+        """
+        异步处理文件并构建FAISS向量数据库
+        
+        Args:
+            files (list): 文件路径列表
+            
+        Returns:
+            FAISS向量数据库实例
+        """
         documents = await self.process_files(files)
         vectordb = await self.vectorize_documents(documents)
         return vectordb
 
 
     async def load_vectordb_and_files(self):
+        """
+        异步加载向量数据库和已上传文件列表
+        """
         try:
             faiss_index_path = os.path.join(self.base_directory, self.kb_name, "faiss_index")
             
@@ -254,6 +309,15 @@ class KnowledgeBase:
             raise  # 重新抛出异常，以便调用者可以处理它
         
     async def update_vectordb(self, files):
+        """
+        异步更新向量数据库，支持首次构建和增量更新
+        
+        Args:
+            files (list): 新文件路径列表
+            
+        Returns:
+            str: 更新结果信息
+        """
         # 将传入的文件列表赋值给 new_files
         new_files = files
         # 获取新文件的文件名列表
@@ -348,6 +412,15 @@ class KnowledgeBase:
         return f"已更新 {len(new_files)} 个文件{new_files_names}到知识库 {self.kb_name} 的向量数据库"
     
     async def remove_file(self, file_name):
+        """
+        异步从知识库中删除指定文件及其相关数据
+        
+        Args:
+            file_name (str): 要删除的文件名
+            
+        Returns:
+            dict: 删除结果信息
+        """
         await self.load_vectordb_and_files()
         if file_name not in self.uploaded_files:
             return {"message": f"文件 {file_name} 不在知识库 {self.kb_name} 中"}
@@ -421,5 +494,11 @@ class KnowledgeBase:
     #         return f"删除文件 {file_name} 时出错: {str(e)}"
 
     async def view_files(self):
+        """
+        异步查看知识库中的文件列表
+        
+        Returns:
+            str: 文件列表信息
+        """
         await self.load_vectordb_and_files()
         return f"知识库 {self.kb_name} 中的文件:\n" + "\n".join(self.uploaded_files)

@@ -36,28 +36,49 @@ URL_PIX2TEXT = _cfg.get("paths", {}).get("pix2text_url", "http://127.0.0.1:8503/
 OCR_TIMEOUT = int(_cfg.get("settings", {}).get("ocr_timeout_secs", 30))
 url_f = URL_OCR
 
-# Ensure pandoc is available for pypandoc on Windows
+# 确保在Windows上安装了pandoc以供pypandoc使用
 def _ensure_pandoc_installed():
     try:
-        # Will raise OSError if pandoc is not found
+        # 如果未找到pandoc将引发OSError
         pypandoc.get_pandoc_version()
     except OSError:
-        logging.info("Pandoc not found. Will use python-docx as fallback.")
+        logging.info("未找到Pandoc。将使用python-docx作为后备方案。")
 
 _ensure_pandoc_installed()
 
 def is_valid_table(table_df, min_char_count=120):
+    """
+    检查表格是否有效（字符数是否超过最小值）
+    
+    Args:
+        table_df: 表格数据
+        min_char_count: 最小字符数阈值
+        
+    Returns:
+        bool: 表格是否有效
+    """
     total_char_count = sum(len(str(cell)) for _, row in table_df.iterrows() for cell in row)
     if total_char_count < min_char_count:
         return False
     return True
+
 def extract_all_table_and_textand_image(pdf_path, out_path_md,image_dir):
+    """
+    提取PDF中的所有表格、文本和图像
+    
+    Args:
+        pdf_path: PDF文件路径
+        out_path_md: 输出Markdown文件路径
+        image_dir: 图像输出目录
+    """
     pdf = pdfplumber.open(pdf_path)
 
     def is_sentence_end(text):
+        """判断文本是否以句子结束符结尾"""
         return re.search(r'[。？！.?!]$', text) is not None
 
     def not_within_bboxes(obj):
+        """检查对象是否在表格边界框之外"""
         return not any(
             obj["x0"] + obj["x1"] >= 2 * bbox[0] and obj["x0"] + obj["x1"] < 2 * bbox[2] and
             obj["top"] + obj["bottom"] >= 2 * bbox[1] and obj["top"] + obj["bottom"] < 2 * bbox[3]
@@ -200,6 +221,16 @@ markdown_splitter = MarkdownHeaderTextSplitter(headers_to_split_on=headers_to_sp
 
 
 def split_text_preserving_tables(text, max_token_length=3000):
+    """
+    在保留表格的情况下分割文本
+    
+    Args:
+        text: 要分割的文本
+        max_token_length: 最大令牌长度
+        
+    Returns:
+        list: 分割后的文本块列表
+    """
     paragraphs = text.split('\n')
     chunks = []
     current_chunk = []
@@ -222,6 +253,17 @@ def split_text_preserving_tables(text, max_token_length=3000):
 
 
 def process_doc_file(doc_file, image_output_dir, markdown_directory):
+    """
+    处理DOC文件
+    
+    Args:
+        doc_file: DOC文件路径
+        image_output_dir: 图像输出目录
+        markdown_directory: Markdown文件目录
+        
+    Returns:
+        list: 分割后的文档列表
+    """
     file_extension = os.path.splitext(doc_file)[1].lower()
     md_header_splits = []
     
@@ -235,12 +277,12 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
             os.makedirs(media_dir, exist_ok=True)
             
             # 将 .docx 文件转换为 Markdown，提取的媒体文件保存在 media_dir 中
-            # If pandoc is unavailable or conversion fails, fallback to python-docx
+            # 如果pandoc不可用或转换失败，则回退到python-docx
             try:
                 markdown_text = pypandoc.convert_file(doc_file, 'markdown', extra_args=['--extract-media=' + media_dir])
             except Exception as e:
                 # 减少警告信息的详细程度
-                logging.info(f"Pandoc not available, using python-docx as fallback.")
+                logging.info(f"无法使用Pandoc，使用python-docx作为后备方案。")
                 try:
                     docu = Document2(doc_file)
                     markdown_text = ""
@@ -248,7 +290,7 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                         text = p.text.strip()
                         markdown_text += (text + "\n") if text else "\n"
                 except Exception as e2:
-                    logging.error(f"python-docx fallback also failed for {doc_file}: {e2}.")
+                    logging.error(f"python-docx后备方案也失败 {doc_file}: {e2}。")
                     markdown_text = ""
             
             c = 1
@@ -275,7 +317,7 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
 
                     if handled_image and img_path and ENABLE_OCR_IMAGES:
                         try:
-                            logging.info(f"[OCR] request {url_f} file={img_path}")
+                            logging.info(f"[OCR] 请求 {url_f} 文件={img_path}")
                             with open(img_path, "rb") as file:
                                 files = {"file": file}
                                 response = requests.post(url_f, files=files, timeout=OCR_TIMEOUT)
@@ -284,9 +326,9 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                             if outs:
                                 all_text += "图片识别内容\n" + outs + "\n"
                                 img_found += 1
-                            logging.info(f"[OCR] success file={img_path} len={len(outs)}")
+                            logging.info(f"[OCR] 成功 文件={img_path} 长度={len(outs)}")
                         except Exception:
-                            logging.exception(f"[OCR] failed file={img_path}")
+                            logging.exception(f"[OCR] 失败 文件={img_path}")
 
                     if "height=" not in i:
                         c = 0
@@ -308,7 +350,7 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                                     with zf.open(name) as src, open(dest, "wb") as dst:
                                         dst.write(src.read())
                                 try:
-                                    logging.info(f"[OCR] request {url_f} file={dest}")
+                                    logging.info(f"[OCR] 请求 {url_f} 文件={dest}")
                                     with open(dest, "rb") as file:
                                         files = {"file": file}
                                         response = requests.post(url_f, files=files, timeout=OCR_TIMEOUT)
@@ -316,11 +358,11 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                                     outs = response.json().get("detection_result", "")
                                     if outs:
                                         all_text += "图片识别内容\n" + outs + "\n"
-                                    logging.info(f"[OCR] success file={dest} len={len(outs)}")
+                                    logging.info(f"[OCR] 成功 文件={dest} 长度={len(outs)}")
                                 except Exception:
-                                    logging.exception(f"[OCR] failed file={dest}")
+                                    logging.exception(f"[OCR] 失败 文件={dest}")
                 except Exception:
-                    logging.exception(f"[DOCX] media unzip failed file={doc_file}")
+                    logging.exception(f"[DOCX] 媒体解压失败 文件={doc_file}")
             
             #docu = Document2(doc_file)
             """
@@ -332,7 +374,7 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                     markdown_text += i.text
             """
             if len(all_text.replace(" ","").replace("\n","")) == 0:
-                raise ValueError(f"The file {os.path.basename(doc_file)} does not contain valid content.")
+                raise ValueError(f"文件 {os.path.basename(doc_file)} 不包含有效内容。")
             # 生成 Markdown 文件的路径
             markdown_file = os.path.join(markdown_directory, os.path.splitext(os.path.basename(doc_file))[0] + ".md")
             
@@ -419,6 +461,16 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
     return md_header_splits
 
 def process_md_file(md_file,markdown_directory):
+    """
+    处理Markdown文件
+    
+    Args:
+        md_file: Markdown文件路径
+        markdown_directory: Markdown文件目录
+        
+    Returns:
+        list: 分割后的文档列表
+    """
     loader = TextLoader(md_file)
     document = loader.load()[0]
     base_name = os.path.basename(md_file)
@@ -428,7 +480,7 @@ def process_md_file(md_file,markdown_directory):
             print(f"文件 '{md_file}' 已被删除。")
         else:
             print(f"文件 '{md_file}' 不存在。")
-        raise ValueError(f"The file {base_name} does not contain valid content.")
+        raise ValueError(f"文件 {base_name} 不包含有效内容。")
         
     markdown_file = os.path.join(markdown_directory, f"{os.path.splitext(os.path.basename(md_file))[0]}.md")
     with open(markdown_file, 'w', encoding='utf-8') as file:
@@ -507,6 +559,16 @@ def process_md_file(md_file,markdown_directory):
 
 
 def process_txt_file(txt_file, markdown_directory):
+    """
+    处理TXT文件
+    
+    Args:
+        txt_file: TXT文件路径
+        markdown_directory: Markdown文件目录
+        
+    Returns:
+        list: 分割后的文档列表
+    """
     with open(txt_file, 'r', encoding='utf-8') as file:
         text = file.read()
         
@@ -518,7 +580,7 @@ def process_txt_file(txt_file, markdown_directory):
             print(f"文件 '{txt_file}' 已被删除。")
         else:
             print(f"文件 '{txt_file}' 不存在。")
-        raise ValueError(f"The file {base_name} does not contain valid content.")
+        raise ValueError(f"文件 {base_name} 不包含有效内容。")
     
     # 拆分 Markdown 内容
     chunk_logger.info("正在分块 TXT 文档...")
@@ -581,15 +643,15 @@ def process_txt_file(txt_file, markdown_directory):
 
 def pdf_to_markdown(url, pdf_file_path, markdown_file_path, extract_images=False):
     """
-    Convert a PDF file to Markdown format by sending a request to the specified URL.
+    通过向指定URL发送请求将PDF文件转换为Markdown格式。
 
-    :param url: The URL to send the POST request to.
-    :param pdf_file_path: The file path of the PDF to be converted.
-    :param markdown_file_path: The file path where the resulting Markdown will be saved.
-    :param extract_images: Optional parameter to extract images from the PDF.
+    :param url: 发送POST请求的URL。
+    :param pdf_file_path: 要转换的PDF文件路径。
+    :param markdown_file_path: 保存结果Markdown的文件路径。
+    :param extract_images: 可选参数，用于从PDF中提取图像。
     """
     try:
-        # Open and read the PDF file
+        # 打开并读取PDF文件
         #images = convert_from_path('/root/autodl-tmp/project_knowledge/a1.pdf')
         
 
@@ -597,21 +659,21 @@ def pdf_to_markdown(url, pdf_file_path, markdown_file_path, extract_images=False
         with open(pdf_file_path, 'rb') as pdf_file:
             pdf_content = pdf_file.read()
 
-        # Prepare the files and parameters for the request
+        # 准备请求的文件和参数
         files = {'pdf_files': (os.path.basename(pdf_file_path), pdf_content, 'application/pdf')}
         params = {'extract_images': extract_images}
 
-        # Send the POST request
+        # 发送POST请求
         response = requests.post(url, files=files, params=params)
-        response.raise_for_status()  # Raise an HTTPError if the HTTP request returned an unsuccessful status code
+        response.raise_for_status()  # 如果HTTP请求返回不成功的状态码则引发HTTPError
 
-        # Get the response content as JSON
+        # 将响应内容获取为JSON
         response_json = response.json()[0]['markdown']
 
-        # Convert the JSON response to Markdown format
+        # 将JSON响应转换为Markdown格式
         markdown_content = json_to_markdown(response_json)
 
-        # Write the formatted Markdown content into the file
+        # 将格式化的Markdown内容写入文件
         with open(markdown_file_path, 'w', encoding='utf-8') as markdown_file:
             markdown_file.write(markdown_content)
         """
@@ -631,31 +693,31 @@ def pdf_to_markdown(url, pdf_file_path, markdown_file_path, extract_images=False
             image_byte_array = image_byte_array.getvalue()
             
             files = {'image': ('filename.jpg', image_byte_array, 'image/jpeg')}
-            logging.info(f"[pix2text] request {url}")
+            logging.info(f"[pix2text] 请求 {url}")
             r = requests.post(url, data=data, files=files)
             
             all_text += r.json()['results']
-            logging.info("[pix2text] success")
+            logging.info("[pix2text] 成功")
         
         with open(markdown_file_path, 'w', encoding='utf-8') as markdown_file:
             markdown_file.write(all_text)
         
-        print(f"Response content has been written to {markdown_file_path}")
+        print(f"响应内容已写入 {markdown_file_path}")
 
     except requests.exceptions.RequestException as e:
-        print(f"An error occurred while making the request: {e}")
+        print(f"发起请求时发生错误: {e}")
     except json.JSONDecodeError:
-        print("An error occurred while parsing the response JSON.")
+        print("解析响应JSON时发生错误。")
     except Exception as e:
-        print(f"An unexpected error occurred: {e}")
+        print(f"发生意外错误: {e}")
 
 def json_to_markdown(data, level=1):
     """
-    Convert JSON data to Markdown format.
+    将JSON数据转换为Markdown格式。
 
-    :param data: The JSON data to convert.
-    :param level: The current heading level.
-    :return: The formatted Markdown content.
+    :param data: 要转换的JSON数据。
+    :param level: 当前标题级别。
+    :return: 格式化的Markdown内容。
     """
     md_content = ""
     if isinstance(data, dict):
@@ -673,6 +735,18 @@ url = URL_PIX2TEXT
 
 
 def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
+    """
+    处理PDF文件
+    
+    Args:
+        pdf_path: PDF文件路径
+        image_dir: 图像目录
+        md_dir: Markdown目录
+        chunk_size: 分块大小
+        
+    Returns:
+        list: 分割后的文档列表
+    """
     try:
         print(f"开始处理文档: {pdf_path}")
         chunk_logger.info("正在解析 PDF 并分块...")
@@ -740,7 +814,7 @@ def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
                     print(f"文件 '{pdf_path}' 已被删除。")
                 else:
                     print(f"文件 '{pdf_path}' 不存在。")
-                raise ValueError(f"The file {base_name} does not contain valid content.")
+                raise ValueError(f"文件 {base_name} 不包含有效内容。")
 
         if use_traditional_parsing:
             # 使用传统解析方法,按照指定的 chunk 大小分割文本
@@ -794,4 +868,3 @@ def process_pdf(pdf_path, image_dir, md_dir, chunk_size=1000):
     except Exception as e:
         print(f"处理文档出错: {pdf_path}, 错误信息: {e}")
         return []
-    

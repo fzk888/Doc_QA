@@ -24,6 +24,7 @@ import time
 import random
 from concurrent.futures import ThreadPoolExecutor
 # Load configuration
+# 从项目根目录加载全局配置（模型、阈值、路径等），后续各模块统一读取
 with open("config.yaml", "r") as config_file:
     config = yaml.safe_load(config_file)
 
@@ -33,6 +34,7 @@ logger.setLevel(logging.INFO)
 logger.propagate = False
 
 LOG_PROMPT_MAX_CHARS = int(os.getenv("LOG_PROMPT_MAX_CHARS", "300"))
+# 安全日志：仅记录提示词摘要，避免在日志中写入超长文本或用户隐私
 def _log_prompt(text):
     if len(text) <= LOG_PROMPT_MAX_CHARS:
         logger.info(f"Prompt: {text}")
@@ -119,17 +121,24 @@ def get_reranker_model():
 
 class KBState:
     def __init__(self):
+        # 当前知识库对象（封装加载/更新向量库等）
         self.kb = None
+        # FAISS 向量库句柄（为空表示尚未构建或加载失败）
         self.kb_vectordb = None
+        # 当前选中的知识库名称
         self.current_kb_name = None
+        # 简易对话历史（用于拼接到提示词或检索改写）
         self.history = []
+        # 未过滤的上下文集合（用于 BM25 检索器构建）
         self.unfilter_context = []
+        # 基于未过滤上下文的 BM25 检索器
         self.searcher_from_target_doc = None
 
 kb_state = KBState()
     
 def get_top_documents(query: str, req_id=None):
-    # global kb_state
+    # 融合检索入口：并行执行向量检索 + BM25，去重后使用重排模型计算相关分，返回 [(Document, score)]
+    # 注意：需要先确保 kb_state.kb_vectordb / searcher_from_target_doc 可用
     _pref = f"[req:{req_id}] " if req_id else ""
     logger.debug(f"{_pref}KB: {kb_state.current_kb_name}")
     if not kb_state.kb_vectordb or not kb_state.searcher_from_target_doc:
@@ -137,8 +146,10 @@ def get_top_documents(query: str, req_id=None):
 
     # 适度降低向量检索返回数量，减少后续重排负载
     logger.debug(f"{_pref}Performing vector and BM25 search...")
+    # 限制向量检索返回数量，降低后续重排负载
     retriever = kb_state.kb_vectordb.as_retriever(search_kwargs={"k": 4})
     # 并行执行向量检索与 BM25 检索以降低总体等待时间
+    # 并行执行两路检索，缩短端到端等待时间（BGE 向量检索 + BM25）
     with ThreadPoolExecutor(max_workers=2) as ex:
         fut_bge = ex.submit(retriever.invoke, query)
         logger.debug(f"{_pref}BM25 search started")
@@ -150,17 +161,20 @@ def get_top_documents(query: str, req_id=None):
     except Exception:
         pass
     # BM25 已经按得分排序，限制候选数量避免过多文档进入重排
+    # BM25 已按得分排序；控制候选上限，避免过多文档进入重排
     if len(bm25_context) > 8:
         bm25_context = bm25_context[:8]
 
     logger.debug(f"{_pref}Fusing search results...")
+    # 融合两路检索结果；后续以 file_path 去重
     merged_res = bge_context + bm25_context
 
-    if len(merged_res) <= 1:
-        logger.info(f"{_pref}retrieval merged={len(merged_res)}")
-        return [(merged_res[0], 0.3)] if merged_res else []
+    if len(merged_res) == 0:
+        logger.info(f"{_pref}retrieval merged=0")
+        return []
 
     # 基于 file_path 去重，避免对长文本 page_content 做哈希比较
+    # 基于 file_path 去重，避免对长文本进行哈希比较
     unique_by_path = {}
     for doc in merged_res:
         file_path = doc.metadata.get('file_path')
@@ -173,14 +187,14 @@ def get_top_documents(query: str, req_id=None):
         pass
 
     if len(unique_docs) == 1:
-        try:
-            _one_name = os.path.basename(unique_docs[0].metadata.get('file_path', ''))
-            logger.info(f"{_pref}unique_docs=1 skip_rerank name={_one_name}")
-        except Exception:
-            pass
-        return [(unique_docs[0], 0.85)]
+        # 单候选仍走重排获取真实分值，避免固定分导致误判相关
+        reranker = DocumentReranker(get_reranker_model())
+        candidates = unique_docs[:1]
+        top_documents_with_scores = reranker.rerank_documents(query, candidates, top_n=1)
+        return [(doc, round(score, 2)) for doc, score in top_documents_with_scores if doc.metadata.get('file_path')]
 
     logger.debug(f"{_pref}Reranking documents...")
+    # 使用重排模型对候选进行相关性打分，选出 Top-N
     reranker = DocumentReranker(get_reranker_model())
     # 控制进入重排的最大候选数量
     candidates = unique_docs[:8]
@@ -198,9 +212,11 @@ def get_top_documents(query: str, req_id=None):
         pass
 
     # 返回 (Document, score) 且要求存在 file_path 元数据
+    # 返回 (Document, score) 列表，要求存在 file_path 元数据
     return [(doc, round(score, 2)) for doc, score in top_documents_with_scores if doc.metadata.get('file_path')]
 
 def run_llm_Knowlege_baes_file_QA(query: str, keep_history: bool = True):
+    # 基于“已上传文件列表”的简单 KB QA（不做分段检索），用于文件级预览与说明
     openai_api_key = config['paths']['openai_api_keys']
     openai_api_base = config['paths']['openai_api_base']
 
@@ -213,6 +229,7 @@ def run_llm_Knowlege_baes_file_QA(query: str, keep_history: bool = True):
     )
     logger.debug(f"LLM model: {config['models']['llm_model']}")
 
+    # 将历史拼接到提示词，提供上下文参考
     history_str = "\n".join([str(item) for item in kb_state.history]) + "\n这是以上我和你的对话记录，请参考\n"
     # use global kb_state.kb_vectordb; fall back to empty set if not available
     if getattr(kb_state, 'kb_vectordb', None) is None:
@@ -251,6 +268,7 @@ def find_image_links(documents):
 
 
 def generate_guiding_questions(num_questions_total=3, num_questions_per_doc=2):
+    # 遍历知识库文档，调用 LLM 生成若干条引导性问题以辅助用户发问
     llm = ChatOpenAI(
         api_key=config['paths']['openai_api_keys'],
         base_url=config['paths']['openai_api_base'],
@@ -384,6 +402,12 @@ def question_generation_from_last_dialogual(last_dialog):
     return derived_questions
 
 def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_from_user: str, temperature: float, multiple_dialogue: bool, derivation: bool, show_source: bool, req_id=None):
+    # 多文档 KB QA 主流程：
+    # - 支持多轮对话：从 messages 中构造 history_str
+    # - 检索改写：将当前问题改写为适合检索的独立问句
+    # - 分支策略：
+    #   * only_chatKBQA=True 严格依据 KB 回答
+    #   * only_chatKBQA=False 检索优先，低相关时回退自由聊天
     llm = ChatOpenAI(
         api_key=config['paths']['openai_api_keys'],
         base_url=config['paths']['openai_api_base'],
@@ -425,7 +449,25 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         return prompt | llm | StrOutputParser()
     
     if only_chatKBQA:
-        top_documents_with_socre = get_top_documents(query, req_id=req_id)
+        _retrieval_query = query
+        if multiple_dialogue:
+            try:
+                llm_rewrite = ChatOpenAI(
+                    api_key=config['paths']['openai_api_keys'],
+                    base_url=config['paths']['openai_api_base'],
+                    model=config['models']['llm_model'],
+                    temperature=0.2,
+                    streaming=False
+                )
+                rewrite_prompt = PromptTemplate(
+                    template="请根据历史对话将当前问题改写为一个独立、明确的检索查询：\n历史：{history}\n当前问题：{query}\n改写后的检索查询：",
+                    input_variables=["history", "query"]
+                )
+                # 检索改写：在多轮语境下生成更稳健的检索查询
+                _retrieval_query = (rewrite_prompt | llm_rewrite | StrOutputParser()).invoke({"history": history_str, "query": query}).strip()
+            except Exception:
+                _retrieval_query = query
+        top_documents_with_socre = get_top_documents(_retrieval_query, req_id=req_id)
         top_documents = [doc for doc, score in top_documents_with_socre]
         try:
             _names = [os.path.basename(doc.metadata.get('file_path', '')) for doc, _ in top_documents_with_socre if doc.metadata.get('file_path')]
@@ -434,6 +476,9 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
         except Exception:
             pass
 
+        # 阈值：
+        # - rerank_direct_answer_threshold：直接使用文档内 QA 的最低分
+        # - rerank_min_relevance：认为“与文档相关”的最低分（严格 KB 模式）
         thr = float(config['settings'].get('rerank_direct_answer_threshold', 0.8))
         thr_any = float(config['settings'].get('rerank_min_relevance', 0.2))
         score0 = (top_documents_with_socre[0][1] if top_documents_with_socre else 0.0)
@@ -466,6 +511,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                     yield stream_type(answer)
         else:
             if score0 < thr_any:
+                # 严格 KB 模式下未命中：提示未检索到相关上下文
                 yield f"data: {json.dumps(create_response_dict(content='没有检索到与查询相关的上下文信息,对不起,知识库中没有找到可以回答此问题的相关信息。', image_list=None, documents=None, sources=None), ensure_ascii=False)}\n\n".encode('utf-8')
             else:
                 logger.info("文档和问题相关")
@@ -475,6 +521,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                 input_variables = ["query", "top_documents"]
                 if multiple_dialogue:
                     input_variables.append("history")
+                # 构造带有历史与相关段落的提示词
                 prompt = generate_prompt(template, input_variables)
                 chain = create_chain(prompt)
                 inputs = {"query": query, "top_documents": top_documents}
@@ -488,7 +535,27 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                     response_text += chunk
                     yield stream_type(chunk)
     else:
-        top_documents_with_socre = get_top_documents(query)
+        _retrieval_query = query
+        if multiple_dialogue:
+            try:
+                llm_rewrite = ChatOpenAI(
+                    api_key=config['paths']['openai_api_keys'],
+                    base_url=config['paths']['openai_api_base'],
+                    model=config['models']['llm_model'],
+                    temperature=0.2,
+                    streaming=False
+                )
+                rewrite_prompt = PromptTemplate(
+                    template="请根据历史对话将当前问题改写为一个独立、明确的检索查询：\n历史：{history}\n当前问题：{query}\n改写后的检索查询：",
+                    input_variables=["history", "query"]
+                )
+                # 检索改写：多轮对话下提炼独立问句
+                _retrieval_query = (rewrite_prompt | llm_rewrite | StrOutputParser()).invoke({"history": history_str, "query": query}).strip()
+            except Exception:
+                _retrieval_query = query
+        top_documents_with_socre = get_top_documents(_retrieval_query, req_id=req_id)
+        # 自由聊天模式的回退阈值（可通过 config.settings.rerank_min_relevance_chat 调整）
+        thr_any_chat = float(config['settings'].get('rerank_min_relevance_chat', 0.5))
         top_documents = [doc for doc, score in top_documents_with_socre]
         thr = float(config['settings'].get('rerank_direct_answer_threshold', 0.8))
         thr_any = float(config['settings'].get('rerank_min_relevance', 0.2))
@@ -521,7 +588,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
                 except:
                     yield stream_type(answer)
         else:
-            if score0 < thr_any:
+            if score0 < thr_any_chat:
                 logger.debug("No relevant documents found, falling back to only_llm")
                 for chunk in only_llm(input_query, prompt_template_from_user, temperature, multiple_dialogue):
                     yield chunk
@@ -548,6 +615,7 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
 
 
 def only_llm(input_query: str, prompt_template_from_user: str = "", temperature: float = 0.5, multiple_dialogue: bool = False):
+    # 纯 LLM 对话：不依赖知识库检索；支持多轮，将 messages 转为历史注入提示词
     llm = ChatOpenAI(
         api_key=config['paths']['openai_api_keys'],
         base_url=config['paths']['openai_api_base'],
@@ -584,6 +652,7 @@ def only_llm(input_query: str, prompt_template_from_user: str = "", temperature:
     def create_chain(prompt):
         return prompt | llm | StrOutputParser()
     
+    # 通用对话提示词；如用户提供 system 提示，则以用户提示为准
     template = (prompt_template_from_user or "你是一位友好、专业的中文对话助手。请用清晰、自然的中文直接回答用户问题；在没有提供文档时进行自由对话与创作；如需讲故事或科普，请自行组织内容；保持简洁准确，不要声明无法回答。") + \
                     (f"\n以下是历史对话记录：{{history}},请参考历史对话记录。" if multiple_dialogue else "") + \
                     "\n下面是用户问题：{query} 回答："
@@ -625,9 +694,11 @@ def get_uploaded_files():
     return {os.path.basename(doc.metadata.get('file_path', '')) for doc in kb_state.kb_vectordb.docstore._dict.values()}
 
 def stream_type(data, model=config['models']['llm_model']):
+    # SSE 输出格式：兼容前端增量渲染（choices[0].delta.content）
     return f"data: {json.dumps({'id': str(uuid.uuid4()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': data}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n".encode('utf-8')
 
 def stream_type_url(data,file_url, model=config['models']['llm_model']):
+    # SSE 输出格式（带来源链接）：用于直接答案附带文档 URL 的场景
     return f"data: {json.dumps({'id': str(uuid.uuid4()), 'model': model, 'choices': [{'index': 0, 'delta': {'content': data,'file_url': file_url}, 'finish_reason': None}]}, ensure_ascii=False)}\n\n".encode('utf-8')
 
 def create_response_dict(**kwargs):
@@ -638,6 +709,7 @@ def create_response_dict(**kwargs):
     }
 #生成最后一个流式回复
 def create_final_response(current_dialog, show_source, top_documents_with_score, derivation=False):
+    # 最终响应（非流式聚合）构造：支持来源文档、派生问题与图片链接
     derived_questions = None
 
     # 如果 derivation 为 True，获取派生问题
@@ -676,6 +748,7 @@ def create_final_response(current_dialog, show_source, top_documents_with_score,
             })
     top_documents = [doc for doc, score in top_documents_with_score]
     # 查找图片信息
+    # 提取文档中的图片链接（Markdown 语法），用于前端展示
     image_info = find_image_links(top_documents)
     if image_info:
         final_response["image_list"] = image_info
