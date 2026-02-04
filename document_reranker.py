@@ -40,8 +40,21 @@ class DocumentReranker:
         # 构造查询-文档对，用于重排模型计算相似度
         sentence_pairs = [(check_item, doc.page_content) for doc in documents]
         
+        # 调试：记录输入信息
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.debug(f"重排查询: {check_item}")
+        logger.debug(f"重排文档数量: {len(documents)}")
+        for i, (query, content) in enumerate(sentence_pairs[:2]):
+            logger.debug(f"重排对 {i}: query_len={len(query)}, content_len={len(content)}, content_preview={content[:100]}")
+        
         # 使用重排模型计算相似度得分
         scores = self.reranker.compute_score(sentence_pairs, normalize=True)
+        
+        # 调试：记录输出信息
+        logger.debug(f"重排得分原始值: {scores}")
+        if isinstance(scores, (list, np.ndarray)):
+            logger.debug(f"重排得分范围: min={min(scores) if len(scores) > 0 else 'N/A'}, max={max(scores) if len(scores) > 0 else 'N/A'}")
         
         # 确保 scores 是一个列表
         if isinstance(scores, (float, np.float64)):

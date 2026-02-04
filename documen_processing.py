@@ -8,6 +8,7 @@ from langchain_community.document_loaders import TextLoader
 from langchain.schema import Document
 import pypandoc
 import logging
+import time
 from pypdf import PdfReader
 import requests
 import yaml
@@ -317,16 +318,19 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
 
                     if handled_image and img_path and ENABLE_OCR_IMAGES:
                         try:
-                            logging.info(f"[OCR] 请求 {url_f} 文件={img_path}")
+                            start_t = time.time()
+                            logging.info(f"[OCR] 请求 url={url_f} 文件={img_path}")
                             with open(img_path, "rb") as file:
                                 files = {"file": file}
                                 response = requests.post(url_f, files=files, timeout=OCR_TIMEOUT)
+                            status = getattr(response, "status_code", None)
                             response.raise_for_status()
                             outs = response.json().get("detection_result", "")
+                            elapsed = time.time() - start_t
                             if outs:
                                 all_text += "图片识别内容\n" + outs + "\n"
                                 img_found += 1
-                            logging.info(f"[OCR] 成功 文件={img_path} 长度={len(outs)}")
+                            logging.info(f"[OCR] 成功 文件={img_path} 状态={status} 长度={len(outs)} 耗时={elapsed:.3f}s")
                         except Exception:
                             logging.exception(f"[OCR] 失败 文件={img_path}")
 
@@ -337,6 +341,7 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                 else:
                     c = 1
 
+            logging.info(f"[OCR] Markdown图片识别计数 img_found={img_found}")
             if ENABLE_OCR_IMAGES and img_found == 0:
                 try:
                     out_media = os.path.join(media_dir, "media")
@@ -350,15 +355,18 @@ def process_doc_file(doc_file, image_output_dir, markdown_directory):
                                     with zf.open(name) as src, open(dest, "wb") as dst:
                                         dst.write(src.read())
                                 try:
-                                    logging.info(f"[OCR] 请求 {url_f} 文件={dest}")
+                                    start_t = time.time()
+                                    logging.info(f"[OCR] 请求 url={url_f} 文件={dest}")
                                     with open(dest, "rb") as file:
                                         files = {"file": file}
                                         response = requests.post(url_f, files=files, timeout=OCR_TIMEOUT)
+                                    status = getattr(response, "status_code", None)
                                     response.raise_for_status()
                                     outs = response.json().get("detection_result", "")
+                                    elapsed = time.time() - start_t
                                     if outs:
                                         all_text += "图片识别内容\n" + outs + "\n"
-                                    logging.info(f"[OCR] 成功 文件={dest} 长度={len(outs)}")
+                                    logging.info(f"[OCR] 成功 文件={dest} 状态={status} 长度={len(outs)} 耗时={elapsed:.3f}s")
                                 except Exception:
                                     logging.exception(f"[OCR] 失败 文件={dest}")
                 except Exception:
@@ -691,17 +699,36 @@ def pdf_to_markdown(url, pdf_file_path, markdown_file_path, extract_images=False
             image_byte_array = io.BytesIO()
             image.save(image_byte_array, format='JPEG')
             image_byte_array = image_byte_array.getvalue()
-            
+
             files = {'image': ('filename.jpg', image_byte_array, 'image/jpeg')}
             logging.info(f"[pix2text] 请求 {url}")
             r = requests.post(url, data=data, files=files)
-            
-            all_text += r.json()['results']
-            logging.info("[pix2text] 成功")
-        
+
+            # 调试输出
+            logging.info(f"[pix2text] 响应状态码: {r.status_code}")
+            try:
+                response_json = r.json()
+                logging.info(f"[pix2text] 响应内容: {response_json}")
+
+                if 'results' in response_json:
+                    all_text += response_json['results']
+                    logging.info("[pix2text] 成功")
+                else:
+                    # 打印错误详情
+                    if 'detail' in response_json:
+                        logging.error(f"[pix2text] 服务返回错误: {response_json['detail']}")
+                    logging.warning(f"[pix2text] 响应中缺少 'results' 字段: {list(response_json.keys())}")
+                    # 尝试使用其他字段
+                    for key in ['markdown', 'text', 'content']:
+                        if key in response_json:
+                            all_text += str(response_json[key])
+                            break
+            except Exception as e:
+                logging.error(f"[pix2text] 解析响应失败: {e}, 原始响应: {r.text[:200]}")
+
         with open(markdown_file_path, 'w', encoding='utf-8') as markdown_file:
             markdown_file.write(all_text)
-        
+
         print(f"响应内容已写入 {markdown_file_path}")
 
     except requests.exceptions.RequestException as e:

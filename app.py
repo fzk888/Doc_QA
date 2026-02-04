@@ -16,6 +16,7 @@ import time
 from logging.handlers import RotatingFileHandler
 import aiofiles
 import json
+from dotenv import load_dotenv
 from functions import (
     run_llm_Knowlege_baes_file_QA,
     run_llm_MulitDocQA,
@@ -53,6 +54,10 @@ if not any(h for h in logger.handlers if getattr(h, "_is_console", False)):
 # Reduce noisy third-party logs
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.WARNING)
+
+# Load .env (API keys, base urls, etc.)
+# 默认从当前工作目录（项目根目录）读取 .env；如需自定义路径可设置 DOTENV_PATH
+load_dotenv(os.getenv("DOTENV_PATH"))
 
 # Load configuration
 with open("config.yaml", "r") as config_file:

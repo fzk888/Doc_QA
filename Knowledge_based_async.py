@@ -15,7 +15,7 @@ import torch
 from pathlib import Path
 from add.morefile.ppt_processing import process_ppt_file
 from add.morefile.html_processing import process_html_file
-from add.morefile.excel_processing import process_excel_file, process_csv_file
+from add.morefile.excel import process_excel_file
 from add.morefile.pic_processing import process_pic_file
 from add.morefile.doc_processing import process_doc2_file
 
@@ -172,7 +172,7 @@ class KnowledgeBase:
 
         for file in tqdm(file_groups['xlsx'], desc="Processing XLSX files"):
             try:
-                md_header_splits = process_excel_file(file, self.markdown_directory)
+                md_header_splits = await process_excel_file(file, self.markdown_directory)
                 all_md_header_splits.extend(md_header_splits)
             except Exception as e:
                 print(f"处理文件 {file} 时出错: {e}")
@@ -180,7 +180,7 @@ class KnowledgeBase:
 
         for file in tqdm(file_groups['csv'], desc="Processing CSV files"):
             try:
-                md_header_splits = process_csv_file(file, self.markdown_directory)
+                md_header_splits = await process_excel_file(file, self.markdown_directory)
                 all_md_header_splits.extend(md_header_splits)
             except Exception as e:
                 print(f"处理文件 {file} 时出错: {e}")

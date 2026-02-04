@@ -27,7 +27,7 @@ Doc_QA/
 │   ├── morefile/                  # 其他格式解析（PPTX/HTML/Excel/图片等）
 │   └── ocr/ocr_app.py             # OCR 子服务（PaddleOCR）
 ├── Knowledge_based/               # 知识库根（faiss_index/markdown_directory/uploads 等）
-└── req.txt                        # 依赖
+└── req.txt                        # 依赖多轮 Query Rewrite
 ```
 
 ## 安装与环境

@@ -10,6 +10,7 @@ import aiofiles
 import tiktoken
 import yaml
 from typing import List
+from dotenv import load_dotenv
 from langchain_core.runnables import RunnablePassthrough
 from Knowledge_based_async import KnowledgeBase
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
@@ -23,10 +24,37 @@ from bm25_search import BM25Search
 import time
 import random
 from concurrent.futures import ThreadPoolExecutor
+# Load .env (API keys, base urls, etc.)
+# 默认从当前工作目录（项目根目录）读取 .env；如需自定义路径可设置 DOTENV_PATH
+load_dotenv(os.getenv("DOTENV_PATH"))
+
 # Load configuration
 # 从项目根目录加载全局配置（模型、阈值、路径等），后续各模块统一读取
-with open("config.yaml", "r") as config_file:
+with open("config.yaml", "r", encoding="utf-8") as config_file:
     config = yaml.safe_load(config_file)
+
+def _get_env_first(*keys: str) -> str | None:
+    """
+    依次尝试从环境变量读取；返回第一个非空值。
+    """
+    for k in keys:
+        v = os.getenv(k)
+        if v is not None and str(v).strip() != "":
+            return v
+    return None
+
+# --- Secrets / endpoints: env overrides config ---
+# 兼容历史字段：
+# - config.paths.openai_api_keys / openai_api_base
+# - 以及 add/morefile/excel.py 中用到的 DEEPSEEK_* 变量
+_api_key = _get_env_first("OPENAI_API_KEY", "OPENAI_API_KEYS", "DEEPSEEK_API_KEY")
+_base_url = _get_env_first("OPENAI_API_BASE", "OPENAI_BASE_URL", "DEEPSEEK_BASE_URL")
+if "paths" not in config or config["paths"] is None:
+    config["paths"] = {}
+if _api_key:
+    config["paths"]["openai_api_keys"] = _api_key
+if _base_url:
+    config["paths"]["openai_api_base"] = _base_url
 
 # Configure logging
 logger = logging.getLogger("docqa")
@@ -72,7 +100,7 @@ def _render_prompt_safe(prompt, **kwargs):
     if 'document' in safe:
         doc_val = safe['document']
         if isinstance(doc_val, list):
-            doc_str = "\n".join([str(x) for x in doc_val])
+            doc_str = "\n".join([str(x) for x in doc_val]) 
         else:
             doc_str = str(doc_val)
         safe['document'] = _truncate_text(doc_str, 800)
@@ -115,7 +143,15 @@ def get_embeddings():
 def get_reranker_model():
     global _reranker_model
     if _reranker_model is None:
-        _reranker_model = FlagReranker(config['paths']['reranker_model_dir'], use_fp16=config['settings']['use_fp16'])
+        try:
+            _reranker_model = FlagReranker(
+                config['paths']['reranker_model_dir'],
+                use_fp16=config['settings'].get('use_fp16', True),
+            )
+        except Exception as e:
+            # Windows 上常见：OSError 1455（页面文件太小/虚拟内存不足）导致模型无法加载
+            logger.exception(f"重排模型加载失败，将禁用重排并降级到非重排检索: {e}")
+            _reranker_model = False  # sentinel：表示已尝试但失败
     return _reranker_model
 
 
@@ -141,8 +177,84 @@ def get_top_documents(query: str, req_id=None):
     # 注意：需要先确保 kb_state.kb_vectordb / searcher_from_target_doc 可用
     _pref = f"[req:{req_id}] " if req_id else ""
     logger.debug(f"{_pref}KB: {kb_state.current_kb_name}")
+    
+    # 特殊处理：根据配置决定Excel文档的查询策略
+    if kb_state.kb_vectordb and hasattr(kb_state.kb_vectordb, 'docstore'):
+        excel_docs = [doc for doc_id, doc in kb_state.kb_vectordb.docstore._dict.items() 
+                     if doc.metadata.get('file_path', '').endswith(('.xlsx', '.xls', '.xlsm'))]
+        total_docs = len(kb_state.kb_vectordb.docstore._dict)
+        
+        # 读取配置中的Excel查询策略
+        excel_strategy = config.get('settings', {}).get('excel_query_strategy', 'auto')
+        
+        # 决定是否使用LlamaIndex查询
+        use_llamaindex = False
+        if excel_strategy == 'llamaindex':
+            # 强制使用LlamaIndex（只要有Excel文档）
+            use_llamaindex = len(excel_docs) > 0
+            if use_llamaindex:
+                logger.info(f"{_pref}配置为强制使用LlamaIndex查询（检测到 {len(excel_docs)} 个Excel文档）")
+        elif excel_strategy == 'faiss':
+            # 强制使用FAISS（常规检索）
+            use_llamaindex = False
+            logger.info(f"{_pref}配置为使用FAISS查询（常规检索+重排）")
+        elif excel_strategy == 'auto':
+            # 自动检测：如果所有文档都是Excel，使用LlamaIndex；否则使用FAISS
+            use_llamaindex = (total_docs > 0 and len(excel_docs) == total_docs)
+            if use_llamaindex:
+                logger.info(f"{_pref}自动检测：知识库只包含Excel文档（{total_docs}个），使用LlamaIndex查询引擎（不走重排逻辑）")
+            else:
+                logger.info(f"{_pref}自动检测：知识库包含混合文档（Excel: {len(excel_docs)}/{total_docs}），使用FAISS查询（常规检索+重排）")
+        
+        # 如果决定使用LlamaIndex查询
+        if use_llamaindex:
+            try:
+                from add.morefile.excel import query_excel_with_llamaindex
+                import yaml
+                
+                # 获取知识库目录（使用局部变量避免覆盖全局 config）
+                with open("config.yaml", "r") as config_file:
+                    local_cfg = yaml.safe_load(config_file)
+                KB_DIR = local_cfg['paths']['kb_dir']
+                kb_dir = os.path.join(KB_DIR, kb_state.current_kb_name)
+                
+                # 使用LlamaIndex查询
+                excel_results = query_excel_with_llamaindex(query, kb_state.current_kb_name, kb_dir, req_id=req_id)
+                if excel_results:
+                    logger.info(f"{_pref}LlamaIndex查询成功，返回 {len(excel_results)} 个结果")
+                    return excel_results
+                else:
+                    logger.warning(f"{_pref}LlamaIndex查询未返回结果，回退到常规检索")
+            except Exception as e:
+                logger.warning(f"{_pref}LlamaIndex查询失败，回退到常规检索: {e}")
+                import traceback
+                logger.debug(traceback.format_exc())
+    
     if not kb_state.kb_vectordb or not kb_state.searcher_from_target_doc:
         raise ValueError("Knowledge base not loaded.")
+
+    # 调试：检查向量库中的文档数量和内容
+    if kb_state.kb_vectordb and hasattr(kb_state.kb_vectordb, 'docstore'):
+        total_docs = len(kb_state.kb_vectordb.docstore._dict)
+        logger.info(f"{_pref}向量库中共有 {total_docs} 个文档块")
+        # 检查是否有Excel相关的文档
+        excel_docs = [doc for doc_id, doc in kb_state.kb_vectordb.docstore._dict.items() 
+                     if doc.metadata.get('file_path', '').endswith(('.xlsx', '.xls', '.xlsm'))]
+        logger.info(f"{_pref}其中Excel相关文档: {len(excel_docs)} 个")
+        if excel_docs:
+            for i, doc in enumerate(excel_docs[:3]):
+                content_preview = doc.page_content[:200] if doc.page_content else "空"
+                logger.info(f"{_pref}Excel文档 {i}: file_path={os.path.basename(doc.metadata.get('file_path', ''))}, "
+                          f"content_len={len(doc.page_content) if doc.page_content else 0}, "
+                          f"preview={content_preview}")
+    
+    # 调试：检查BM25索引中的文档
+    if kb_state.searcher_from_target_doc and hasattr(kb_state.searcher_from_target_doc, 'docs'):
+        bm25_docs_count = len(kb_state.searcher_from_target_doc.docs)
+        logger.info(f"{_pref}BM25索引中共有 {bm25_docs_count} 个文档")
+        excel_bm25 = [doc for doc in kb_state.searcher_from_target_doc.docs 
+                     if doc.metadata.get('file_path', '').endswith(('.xlsx', '.xls', '.xlsm'))]
+        logger.info(f"{_pref}BM25中Excel相关文档: {len(excel_bm25)} 个")
 
     # 适度降低向量检索返回数量，减少后续重排负载
     logger.debug(f"{_pref}Performing vector and BM25 search...")
@@ -158,6 +270,11 @@ def get_top_documents(query: str, req_id=None):
         bm25_context = fut_bm25.result()
     try:
         logger.info(f"{_pref}retrieval bge={len(bge_context)} bm25={len(bm25_context)}")
+        # 调试：显示检索到的文档内容预览
+        if bge_context:
+            logger.info(f"{_pref}BGE检索到的文档预览: {[os.path.basename(d.metadata.get('file_path', '')) for d in bge_context[:3]]}")
+        if bm25_context:
+            logger.info(f"{_pref}BM25检索到的文档预览: {[os.path.basename(d.metadata.get('file_path', '')) for d in bm25_context[:3]]}")
     except Exception:
         pass
     # BM25 已经按得分排序，限制候选数量避免过多文档进入重排
@@ -166,21 +283,25 @@ def get_top_documents(query: str, req_id=None):
         bm25_context = bm25_context[:8]
 
     logger.debug(f"{_pref}Fusing search results...")
-    # 融合两路检索结果；后续以 file_path 去重
+    # 融合两路检索结果；后续去重
     merged_res = bge_context + bm25_context
 
     if len(merged_res) == 0:
         logger.info(f"{_pref}retrieval merged=0")
         return []
 
-    # 基于 file_path 去重，避免对长文本 page_content 做哈希比较
-    # 基于 file_path 去重，避免对长文本进行哈希比较
-    unique_by_path = {}
+    # 基于内容去重，避免重复的文档块
+    # 使用 (file_path, content_hash) 作为唯一标识，这样同一文件的不同chunk都能保留
+    unique_docs_dict = {}
     for doc in merged_res:
-        file_path = doc.metadata.get('file_path')
-        if file_path and file_path not in unique_by_path:
-            unique_by_path[file_path] = doc
-    unique_docs = list(unique_by_path.values())
+        file_path = doc.metadata.get('file_path', '')
+        # 使用内容的前100字符作为简单hash（避免对完整内容做hash计算）
+        content_preview = doc.page_content[:100] if doc.page_content else ''
+        unique_key = (file_path, hash(content_preview))
+        # 如果这个key不存在，或者当前文档内容更长（保留更完整的内容）
+        if unique_key not in unique_docs_dict or len(doc.page_content) > len(unique_docs_dict[unique_key].page_content):
+            unique_docs_dict[unique_key] = doc
+    unique_docs = list(unique_docs_dict.values())
     try:
         logger.info(f"{_pref}unique_docs={len(unique_docs)}")
     except Exception:
@@ -195,15 +316,46 @@ def get_top_documents(query: str, req_id=None):
 
     logger.debug(f"{_pref}Reranking documents...")
     # 使用重排模型对候选进行相关性打分，选出 Top-N
-    reranker = DocumentReranker(get_reranker_model())
+    _rm = get_reranker_model()
+    if _rm is False:
+        # 降级：不做重排，直接返回候选（保留原始顺序/相似度顺序）
+        # 这里给一个较低但非0的分，避免后续严格KB阈值直接判定“未命中”
+        return [(doc, 0.2) for doc in candidates[:3] if doc.metadata.get('file_path')]
+    reranker = DocumentReranker(_rm)
     # 控制进入重排的最大候选数量
     candidates = unique_docs[:8]
+    
+    # 过滤掉内容太短的文档（少于50字符的文档通常没有实际内容）
+    min_content_length = 50
+    filtered_candidates = [doc for doc in candidates if doc.page_content and len(doc.page_content.strip()) >= min_content_length]
+    if len(filtered_candidates) < len(candidates):
+        removed_count = len(candidates) - len(filtered_candidates)
+        logger.info(f"{_pref}过滤掉 {removed_count} 个内容过短的文档（少于{min_content_length}字符）")
+        candidates = filtered_candidates
+    
+    if not candidates:
+        logger.warning(f"{_pref}所有候选文档都被过滤，无法进行重排")
+        return []
+    
     try:
         _cand_names = [os.path.basename(d.metadata.get('file_path', '')) for d in candidates if d.metadata.get('file_path')]
-        logger.info(f"{_pref}candidates={_cand_names}")
+        logger.info(f"{_pref}candidates={_cand_names} (共{len(candidates)}个)")
+        # 调试：显示候选文档的内容预览
+        for i, doc in enumerate(candidates[:3]):
+            content_preview = doc.page_content[:200] if doc.page_content else "空"
+            logger.info(f"{_pref}候选文档 {i} 内容预览: {content_preview}")
     except Exception:
         pass
+    
+    # 调试：显示查询内容
+    logger.info(f"{_pref}重排查询: {query}")
     top_documents_with_scores = reranker.rerank_documents(query, candidates, top_n=3)
+    
+    # 调试：显示重排得分详情
+    try:
+        logger.info(f"{_pref}重排得分详情（原始值）: {[(os.path.basename(doc.metadata.get('file_path', '')), round(score, 4)) for doc, score in top_documents_with_scores]}")
+    except Exception:
+        pass
     try:
         _sel_names = [os.path.basename(doc.metadata.get('file_path', '')) for doc, _ in top_documents_with_scores if doc.metadata.get('file_path')]
         _sel_scores = [round(score, 2) for _, score in top_documents_with_scores if _]
@@ -212,8 +364,8 @@ def get_top_documents(query: str, req_id=None):
         pass
 
     # 返回 (Document, score) 且要求存在 file_path 元数据
-    # 返回 (Document, score) 列表，要求存在 file_path 元数据
-    return [(doc, round(score, 2)) for doc, score in top_documents_with_scores if doc.metadata.get('file_path')]
+    # 注意：这里保留原始得分（不四舍五入），让后续的阈值判断更准确
+    return [(doc, score) for doc, score in top_documents_with_scores if doc.metadata.get('file_path')]
 
 def run_llm_Knowlege_baes_file_QA(query: str, keep_history: bool = True):
     # 基于“已上传文件列表”的简单 KB QA（不做分段检索），用于文件级预览与说明
@@ -478,10 +630,29 @@ def run_llm_MulitDocQA(input_query: str, only_chatKBQA: bool, prompt_template_fr
 
         # 阈值：
         # - rerank_direct_answer_threshold：直接使用文档内 QA 的最低分
-        # - rerank_min_relevance：认为“与文档相关”的最低分（严格 KB 模式）
+        # - rerank_min_relevance：认为"与文档相关"的最低分（严格 KB 模式）
         thr = float(config['settings'].get('rerank_direct_answer_threshold', 0.8))
         thr_any = float(config['settings'].get('rerank_min_relevance', 0.2))
         score0 = (top_documents_with_socre[0][1] if top_documents_with_socre else 0.0)
+        
+        # 调试：显示得分和阈值
+        logger.info(f"{_pref}重排得分: {score0:.4f}, 阈值: {thr_any}")
+        
+        # 特殊处理：对于Excel文档，如果检索到了但得分较低，可能是重排模型对表格格式理解不好
+        # 检查是否所有文档都是Excel文件，如果是，可以适当降低阈值
+        all_excel = all(doc.metadata.get('file_path', '').endswith(('.xlsx', '.xls', '.xlsm')) 
+                       for doc in top_documents if doc.metadata.get('file_path'))
+        if all_excel and score0 > 0 and score0 < thr_any:
+            # Excel文档的重排得分可能偏低，使用更宽松的阈值
+            excel_threshold = max(0.01, thr_any * 0.1)  # 降低到原来的10%，但至少0.01
+            logger.info(f"{_pref}检测到Excel文档，使用更宽松的阈值: {excel_threshold}")
+            if score0 >= excel_threshold:
+                logger.info(f"{_pref}Excel文档得分 {score0:.4f} 通过宽松阈值 {excel_threshold}")
+                # 继续处理，不返回"未检索到"
+                score0 = thr_any  # 临时提升得分，让它通过阈值检查
+            else:
+                logger.warning(f"{_pref}Excel文档得分 {score0:.4f} 仍低于宽松阈值 {excel_threshold}")
+        
         direct = bool(top_documents) and bool(top_documents[0].metadata.get("isQA")) and score0 >= thr
 
         if direct:

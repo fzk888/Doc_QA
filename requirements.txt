@@ -19,8 +19,8 @@ hanziconv
 nltk
 pycryptodomex
 cachetools
-ruamel.yaml
-strenum
+ruamel-yaml
+aenum
 roman_numbers
 word2number
 cn2an
@@ -37,3 +37,15 @@ readability
 html_text
 chardet
 python-multipart
+# LlamaParse 依赖
+
+llama-index>=0.14.13
+llama-index-vector-stores-chroma>=0.4.0
+llama-index-embeddings-huggingface>=0.5.0
+llama-index-llms-deepseek>=0.1.0
+llama-parse>=0.6.0
+chromadb>=0.5.0
+nest-asyncio>=1.6.0
+python-dotenv>=1.0.0
+llama-index-readers-file>=0.5.6
+llama-index-core>=0.14.13
