@@ -2,7 +2,7 @@ import subprocess
 import os
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import CharacterTextSplitter
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 def split_text_preserving_tables(text, max_token_length=3000):
     paragraphs = text.split('\n')

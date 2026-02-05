@@ -16,7 +16,7 @@ from Knowledge_based_async import KnowledgeBase
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 from FlagEmbedding import FlagReranker
 from openai import OpenAI
-from langchain.prompts import PromptTemplate
+from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
 from document_reranker import DocumentReranker
@@ -213,7 +213,7 @@ def get_top_documents(query: str, req_id=None):
                 import yaml
                 
                 # 获取知识库目录（使用局部变量避免覆盖全局 config）
-                with open("config.yaml", "r") as config_file:
+                with open("config.yaml", "r", encoding="utf-8") as config_file:
                     local_cfg = yaml.safe_load(config_file)
                 KB_DIR = local_cfg['paths']['kb_dir']
                 kb_dir = os.path.join(KB_DIR, kb_state.current_kb_name)

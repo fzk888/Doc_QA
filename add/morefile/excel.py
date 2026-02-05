@@ -12,10 +12,11 @@ from llama_index.embeddings.huggingface import HuggingFaceEmbedding
 from llama_index.vector_stores.chroma import ChromaVectorStore
 import chromadb
 from dotenv import load_dotenv
-from langchain.schema import Document
+from langchain_core.documents import Document
 
-# 加载环境变量
-load_dotenv()
+# 加载环境变量（从项目根目录的 .env，与当前工作目录无关）
+_env_dir = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+load_dotenv(os.path.join(_env_dir, ".env"))
 
 # 初始化日志
 logger = logging.getLogger(__name__)
@@ -593,7 +594,7 @@ def query_excel_with_llamaindex(query: str, kb_name: str, kb_dir: str, req_id=No
                 if 'source' not in metadata:
                     metadata['source'] = 'excel_llamaindex'
                 
-                from langchain.schema import Document
+                from langchain_core.documents import Document
                 doc = Document(page_content=str(content), metadata=metadata)
                 langchain_docs.append((doc, 1.0))  # 固定得分为1.0，因为不走重排
             except Exception as e:

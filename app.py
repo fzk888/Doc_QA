@@ -17,6 +17,11 @@ from logging.handlers import RotatingFileHandler
 import aiofiles
 import json
 from dotenv import load_dotenv
+
+# 尽早加载 .env，确保后续导入的模块能读到环境变量（与工作目录无关）
+_env_path = os.getenv("DOTENV_PATH") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+load_dotenv(_env_path)
+
 from functions import (
     run_llm_Knowlege_baes_file_QA,
     run_llm_MulitDocQA,
@@ -55,12 +60,8 @@ if not any(h for h in logger.handlers if getattr(h, "_is_console", False)):
 logging.getLogger("transformers").setLevel(logging.ERROR)
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
-# Load .env (API keys, base urls, etc.)
-# 默认从当前工作目录（项目根目录）读取 .env；如需自定义路径可设置 DOTENV_PATH
-load_dotenv(os.getenv("DOTENV_PATH"))
-
 # Load configuration
-with open("config.yaml", "r") as config_file:
+with open("config.yaml", "r", encoding="utf-8") as config_file:
     config = yaml.safe_load(config_file)
 
 # Initialize FastAPI app

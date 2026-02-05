@@ -1,5 +1,5 @@
 from typing import List, Tuple
-from langchain.docstore.document import Document
+from langchain_core.documents import Document
 import numpy as np
 
 class DocumentReranker:

@@ -20,7 +20,7 @@ from add.morefile.pic_processing import process_pic_file
 from add.morefile.doc_processing import process_doc2_file
 
 import yaml
-with open("config.yaml", "r") as config_file:
+with open("config.yaml", "r", encoding="utf-8") as config_file:
     config = yaml.safe_load(config_file)
 
 import logging

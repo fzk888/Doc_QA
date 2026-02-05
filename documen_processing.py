@@ -3,9 +3,9 @@ import re
 import pdfplumber
 import pandas as pd
 from tqdm import tqdm
-from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
 from langchain_community.document_loaders import TextLoader
-from langchain.schema import Document
+from langchain_core.documents import Document
 import pypandoc
 import logging
 import time
@@ -28,7 +28,7 @@ url_f = None
 
 # 统一分块日志记录器
 chunk_logger = logging.getLogger("docqa.chunk")
-with open("config.yaml", "r") as _cf:
+with open("config.yaml", "r", encoding="utf-8") as _cf:
     _cfg = yaml.safe_load(_cf)
 ENABLE_OCR_IMAGES = bool(_cfg.get("settings", {}).get("enable_ocr_images", False))
 ENABLE_PDF_PIX2TEXT = bool(_cfg.get("settings", {}).get("enable_pdf_pix2text", False))

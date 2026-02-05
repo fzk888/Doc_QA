@@ -4,6 +4,8 @@
 pdfplumber
 langchain
 langchain_community
+langchain-text-splitters
+langchain-core
 pypandoc
 pypdf
 rank_bm25
@@ -21,6 +23,7 @@ pycryptodomex
 cachetools
 ruamel-yaml
 aenum
+strenum
 roman_numbers
 word2number
 cn2an
@@ -37,6 +40,7 @@ readability
 html_text
 chardet
 python-multipart
+fastapi
 # LlamaParse 依赖
 
 llama-index>=0.14.13

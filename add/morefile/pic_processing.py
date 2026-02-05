@@ -4,9 +4,9 @@ import yaml
 import os
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import CharacterTextSplitter
-from langchain.schema import Document
+from langchain_core.documents import Document
 
-with open("config.yaml", "r") as _cf:
+with open("config.yaml", "r", encoding="utf-8") as _cf:
     _cfg = yaml.safe_load(_cf)
 PIC_OCR_PROVIDER = (_cfg.get("settings", {}).get("pic_ocr_provider", "paddle") or "paddle").lower()
 URL_OCR = _cfg.get("paths", {}).get("ocr_service_url", "http://127.0.0.1:8001/detection_pic")

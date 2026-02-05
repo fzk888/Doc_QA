@@ -3,7 +3,7 @@ from add.morefile.rag.nlp import rag_tokenizer,tokenize
 
 from langchain_community.document_loaders import TextLoader
 from langchain_text_splitters import CharacterTextSplitter
-from langchain.schema import Document
+from langchain_core.documents import Document
 
 import os
 import re

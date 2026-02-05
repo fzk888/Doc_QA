@@ -3,8 +3,8 @@ import sys
 import os
 import traceback
 from langchain_community.document_loaders import TextLoader
-from langchain.text_splitter import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
-from langchain.schema import Document
+from langchain_text_splitters import MarkdownHeaderTextSplitter, RecursiveCharacterTextSplitter
+from langchain_core.documents import Document
 
 def dummy(a, b):
     pass
