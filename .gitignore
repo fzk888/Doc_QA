@@ -147,12 +147,12 @@ Thumbs.db
 *.rpm
 *.sh
 
-# Model files - 保留通用忽略规则，但允许特定模型
-# 忽略 model 目录下的所有子目录
-model/*/
-# 但不忽略特定的模型
-!model/bge-reranker-large/
-!model/bge-large-zh-v1.5/
+# AI Model files - DO NOT COMMIT
+# These models are too large for Git and should be downloaded separately
+model/
+
+# Vector database files
+chroma_db/
 
 # Output directories
 output-md-root/
