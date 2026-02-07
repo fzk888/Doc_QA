@@ -83,5 +83,14 @@ pip install -r requirements.txt
 - **Embeddings**: `bge-large-zh-v1.5`
 - **Reranker**: `bge-reranker-v2-m3`
 
+
+## 💰 支持与捐赠
+
+如果您觉得本项目对您有所帮助，欢迎通过以下方式支持作者的持续开发：
+
+| 微信支付 | 支付宝 |
+| :---: | :---: |
+| ![微信支付](assets/wechat_qr.jpg) | ![支付宝](assets/alipay_qr.jpg) |
+
 ## 📄 许可证
 本项目遵循 [Apache-2.0 License](LICENSE) 协议。

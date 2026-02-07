@@ -13,15 +13,15 @@ from typing import List
 from dotenv import load_dotenv
 from langchain_core.runnables import RunnablePassthrough
 from langchain_core.documents import Document
-from Knowledge_based_async import KnowledgeBase
+from core.kb_manager import KnowledgeBase
 from langchain_community.embeddings import HuggingFaceBgeEmbeddings
 from FlagEmbedding import FlagReranker
 from openai import OpenAI
 from langchain_core.prompts import PromptTemplate
 from langchain_openai import ChatOpenAI
 from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
-from document_reranker import DocumentReranker
-from bm25_search import BM25Search
+from core.reranker import DocumentReranker
+from core.search_bm25 import BM25Search
 import time
 import random
 from concurrent.futures import ThreadPoolExecutor
