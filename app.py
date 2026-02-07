@@ -3,9 +3,9 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse, JSONResponse, FileResponse
 from fastapi.openapi.utils import get_openapi
 from pydantic import BaseModel, Field
-from bm25_search import BM25Search
+from core.search_bm25 import BM25Search
 from typing import List,Dict
-from Knowledge_based_async import KnowledgeBase
+from core.kb_manager import KnowledgeBase
 import asyncio
 import os
 import shutil
@@ -22,7 +22,7 @@ from dotenv import load_dotenv
 _env_path = os.getenv("DOTENV_PATH") or os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
 load_dotenv(_env_path)
 
-from functions import (
+from core.engine import (
     run_llm_Knowlege_baes_file_QA,
     run_llm_MulitDocQA,
     view_history,
@@ -32,7 +32,7 @@ from functions import (
     only_llm,
     get_embeddings
 )
-from functions import get_top_documents,create_final_response
+from core.engine import get_top_documents, create_final_response
 # Configure logging (console + rotating file)
 LOG_DIR = os.path.join(os.getcwd(), "logs")
 os.makedirs(LOG_DIR, exist_ok=True)

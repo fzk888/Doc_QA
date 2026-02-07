@@ -1,157 +1,87 @@
-# 文档问答系统（Doc_QA）
+# Doc_QA: 高性能模块化 RAG 知识库问答系统
 
-这是一个基于检索增强生成（RAG）的文档问答服务。支持多格式文档解析（含图片 OCR）、混合检索（BGE 向量 + BM25）、重排序（BGE-reranker），并通过大语言模型生成答案（SSE 流式或一次性返回）。
+Doc_QA 是一款基于大规模语言模型 (LLM) 的增强检索生成 (RAG) 系统。本项目经过深度重构，采用模块化设计，支持多种文档格式的高效解析、流式问答以及精准的重排序检索。
 
-## 项目功能
+## 🌟 核心特性
 
-- 多格式文档：PDF、Word（.docx）、Markdown、TXT、PPTX、HTML、Excel、CSV、图片 OCR
-- 知识库管理：创建/删除/选择知识库，独立存储与索引
-- 混合检索：BGE 向量检索 + BM25 关键词检索，BGE-reranker 重排
-- 智能问答：支持多轮对话、显示来源链接、推理过程、SSE 流式输出
-- 引导性问题：从知识库自动生成引导提问
+- **多模态解析支持**：
+    - **文档**：PDF (支持表格提取)、Word (Pandoc/python-docx 引擎)、Markdown (支持 QA 格式)。
+    - **表格与图片**：Excel/CSV (集成 LlamaIndex 方案)、JPG/PNG (PaddleOCR 智能识别)。
+    - **演示文稿**：PPT/PPTX (Aspose.Slides 混合解析)。
+- **高性能检索架构**：
+    - **混合检索**：结合 FAISS 向量检索与 BM25 关键词检索。
+    - **精排优化**：集成 BGE-Reranker 模型，对检索结果进行二次相关性修正。
+- **现代化技术栈**：
+    - **后端**：FastAPI 提供全量异步接口，支持 StreamingResponse 流式输出。
+    - **OCR 服务**：独立 PaddleOCR 服务，支持多机分布式调用。
+    - **前端**：简洁直观的 Web 预览界面。
 
-## 目录结构
+## 📁 目录结构
 
-```
+```text
 Doc_QA/
-├── app.py                         # 后端入口（FastAPI）
-├── functions.py                   # 检索、重排、问答核心逻辑
-├── Knowledge_based_async.py       # 知识库管理与向量库构建
-├── bm25_search.py                 # BM25 搜索
-├── document_reranker.py           # 文档重排序
-├── documen_processing.py          # 文档解析（含 DOCX 图片 OCR 路径）
-├── config.yaml                    # 配置文件
-├── server/
-│   └── index.html                 # 可选静态前端
-├── add/
-│   ├── morefile/                  # 其他格式解析（PPTX/HTML/Excel/图片等）
-│   └── ocr/ocr_app.py             # OCR 子服务（PaddleOCR）
-├── Knowledge_based/               # 知识库根（faiss_index/markdown_directory/uploads 等）
-└── req.txt                        # 依赖多轮 Query Rewrite
+├── core/               # 核心引擎模块
+│   ├── engine.py       # RAG 检索与 QA 逻辑 (原 functions.py)
+│   ├── kb_manager.py   # 知识库管理与更新 (原 Knowledge_based_async.py)
+│   ├── reranker.py     # 文档重排序逻辑
+│   └── search_bm25.py  # BM25 检索实现
+├── parsers/            # 文档解析模块
+│   ├── main_parser.py  # 主解析调度器 (支持 PDF/MD/Word/TXT)
+│   ├── excel_parser.py # 基于 LlamaIndex 的 Excel/CSV 解析
+│   ├── ppt_parser.py   # PPT 解析引擎
+│   └── engines/        # 深度学习解析组件 (DeepDoc/RAGFlow)
+├── services/           # 外部服务
+│   └── ocr/            # PaddleOCR 独立服务
+├── web/                # Web 前端界面
+│   └── index.html
+├── app.py              # FastAPI 应用程序入口
+├── config.yaml         # 全局配置
+├── .env                # 环境变量
+└── requirements.txt    # 项目依赖
 ```
 
-## 安装与环境
+## 💎 核心技术亮点：高级 Excel/CSV 财务解析
 
-- Python 3.10+
-- Windows 10/11（已验证）或 Linux/macOS
-- GPU 可选（推荐，Torch + CUDA）
+本项目针对**真实跨境电商财务数据**进行了深度优化，解决了传统解析器在处理复杂 Excel 表格时的痛点：
 
-安装依赖：
+### 1. 复杂表头映射 (Deep Header Mapping)
+- **智能表头识别**：利用 `LlamaParse` 配合 `MarkdownElementNodeParser` 自动识别多级嵌套表头、跨列分布头以及合并单元格数据。
+- **行列语义关联**：通过集成 DeepSeek LLM，解析器能够理解财务报表中的类项归属关系，确保在 RAG 检索时，离岸账户与对应金额、科目与子科目之间的逻辑链路不会丢失。
 
+### 2. 多维度混合处理
+- **LLM 语义切割**：不同于简单的按行粗暴切割，系统会利用 LLM 对表格进行语义分析，将每一组具备独立业务含义的数据块定义为单独的 Node，显著提升了检索的 Top-K 召回精度。
+- **OCR 增益辅助**：集成自研 OCR 服务，针对 Excel 中内嵌的各类财务单据图片进行自动识别并在后台建立关联索引。
+
+### 3. CSV 优化
+- 针对长文本 CSV 文档，实现了高精度的长度控制机制，防止 Token 溢出同时保留完整的上下文语义。
+
+## 🚀 快速开始
+
+### 1. 环境准备
+推荐使用 Conda 创建独立环境：
 ```bash
-pip install -r req.txt
+conda create -n nlp python=3.11
+conda activate nlp
+pip install -r requirements.txt
 ```
 
-常见依赖：`langchain`、`faiss-gpu/faiss-cpu`、`transformers`、`torch`、`fastapi`、`uvicorn`、`python-multipart`、`sentence-transformers`、`FlagEmbedding`、`jieba`、`pymupdf`、`python-docx`、`openpyxl`、`python-pptx`、`beautifulsoup4`、`pillow`、`paddleocr`。
+### 2. 配置与启动
+1. **配置文件**：编辑 `config.yaml` 填写模型路径、知识库存储目录。
+2. **环境变量**：在 `.env` 中填写您的 `OPENAI_API_KEY` 或 `DEEPSEEK_API_KEY`。
+3. **启动 OCR 服务**：
+   ```bash
+   cd services/ocr
+   python app.py
+   ```
+4. **启动主应用**：
+   ```bash
+   python app.py
+   ```
 
-注意事项：
-- Windows 下 `datrie` 可能需要 Microsoft Visual C++ 14.0+；如不需要可移除。
-- 路径建议使用绝对路径，避免分隔符差异导致问题。
-- 不要在仓库中提交任何密钥；`config.yaml` 的密钥仅用于本地开发。
+## 🛠️ 模型下载
+请确保已下载以下模型并配置路径：
+- **Embeddings**: `bge-large-zh-v1.5`
+- **Reranker**: `bge-reranker-v2-m3`
 
-## 配置
-
-编辑 `config.yaml`：
-
-```yaml
-paths:
-  kb_dir: "./Knowledge_based"
-  model_dir: "./model/bge-large-zh-v1.5"
-  reranker_model_dir: "./model/bge-reranker-large/quietnight/bge-reranker-large"
-  openai_api_base: "http://your-llm-endpoint/v1"
-  openai_api_keys: "<YOUR_API_KEY>"
-  ocr_service_url: "http://127.0.0.1:8001/detection_pic"
-  pix2text_url: "http://127.0.0.1:8503/pix2text"
-
-models:
-  embeddings_model: "bge-large-zh-v1.5"
-  reranker_model: "bge-reranker-large"
-  llm_model: "deepseek-chat"
-
-settings:
-  batch_size: 1024
-  device: "cpu"
-  normalize_embeddings: true
-  use_fp16: true
-  only_chatKBQA_default: true
-  temperature_default: 0.7
-  enable_ocr_images: true
-  enable_pdf_pix2text: true
-  pic_ocr_provider: "paddle"
-
-system:
-  max_workers: 4
-```
-
-## 启动
-
-- 后端服务（端口 `7861`）：
-
-```bash
-python app.py
-```
-
-- 可选 OCR 子服务（端口 `8001`）：
-
-```bash
-python -m uvicorn add.ocr.ocr_app:app --host 127.0.0.1 --port 8001
-```
-
-## API 使用
-
-- 列举知识库：`GET /list_kb`
-- 删除知识库：`POST /delete_kb`（`kb_name`）
-- 更新向量库（上传文件）：`POST /update_vectordb`（表单：`kb_name`、`files[]`）
-- 生成引导性问题：`POST /view_guiding_questions`（JSON：`kb_name`）
-- 删除文件：`POST /remove_file`（表单：`kb_name`、`file_name`）
-- 多文档问答：`POST /mulitdoc_qa`（JSON，支持 SSE）
-- 查看日志：`GET /logs?lines=200`
-
-示例（问答，SSE）：
-
-```json
-{
-  "model": "deepseek-chat",
-  "messages": [
-    {"role": "user", "content": "你的问题"}
-  ],
-  "temperature": 0.5,
-  "stream": true,
-  "only_chatKBQA": true,
-  "kb_name": "your_kb",
-  "show_source": true,
-  "derivation": false,
-  "multiple_dialogue": true
-}
-```
-
-## 多轮对话与日志
-
-- 多轮对话：启用 `multiple_dialogue` 后，系统会基于 `messages` 构建上下文，并在生成阶段参考历史。
-- 请求追踪：服务为每个请求注入 `req_id`，日志统一使用前缀 `[req:xxxx]`。
-- 结构化日志（检索/重排）：
-  - 检索数量：`retrieval bge=4 bm25=8`
-  - 去重后候选：`unique_docs=7`
-  - 进入重排的候选：`candidates=[A.docx,B.pdf,...]`
-  - 重排结果及得分：`rerank_top=[A.docx,C.md,B.pdf] scores=[0.86,0.71,0.65]`
-  - 最终选中文档：`selected_docs=[...] scores=[...]`
-
-## 文档解析与 OCR
-
-- PDF：抽取表格/正文/图片；可启用 `enable_pdf_pix2text` 使用图片转文字兜底。
-- DOCX：优先 Pandoc 转 Markdown；若图片未被解析，回退解压 `.docx` 的 `word/media/*` 并调用 `ocr_service_url` 完成 OCR；识别结果并入文本。
-- Markdown/TXT/PPTX/HTML/Excel/CSV/图片：各自处理模块位于 `add/morefile/`。
-
-## 检索与重排
-
-- 并行执行 BGE 向量检索与 BM25 检索，按 `file_path` 去重，限制候选数量，使用 `DocumentReranker` 重排并选出 Top-N；支持显示来源链接与非流式聚合输出。
-
-## 注意事项
-
-- SSE 需确保反向代理禁用缓冲（响应头包含 `X-Accel-Buffering: no`）。
-- 大文档解析与向量化可能耗时，请关注 `/logs` 输出。
-- 生产环境请使用安全的密钥管理与访问控制，不要将密钥写入仓库。
-
-## 许可证
-
-[MIT License](LICENSE)
+## 📄 许可证
+本项目遵循 [Apache-2.0 License](LICENSE) 协议。
